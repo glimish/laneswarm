@@ -60,6 +60,12 @@ def main():
 rather than asking a question
 - Do NOT put code that crashes at import time (e.g. raising exceptions at class \
 body level). Guard such logic inside functions or if-checks.
+- ALWAYS create `__init__.py` files for every Python package directory you create \
+or write files into. A directory with `.py` files MUST have an `__init__.py`.
+- If your task creates the main application entry point, include a \
+`if __name__ == "__main__":` block so the app can be run directly. For packages \
+using relative imports, also create a `__main__.py` entry point or a top-level \
+runner script outside the package.
 """
 
 REVIEWER_SYSTEM_PROMPT = """\
@@ -141,6 +147,14 @@ and decompose it into a dependency graph of implementable tasks.
 - Infrastructure tasks (project setup, config) should come first with no dependencies
 - Use wide dependency graphs (A->B, A->C, A->D) not chains (A->B->C->D)
 - Every non-infrastructure task should depend on the infrastructure tasks
+- The first infrastructure task MUST create `__init__.py` for every Python package \
+directory in the project structure. Without these files, relative imports will fail.
+- The project MUST include a runnable entry point: either a top-level script outside \
+the package (e.g. `run.py`) with `if __name__ == "__main__":`, or a `__main__.py` \
+inside the package. Do NOT rely on users knowing to run `python -m package`.
+- The first task should also create a `requirements.txt` OR ensure `pyproject.toml` \
+has all dependencies listed, AND include a README or comment explaining how to \
+install and run the project.
 
 ## CRITICAL: Interface Contracts
 
