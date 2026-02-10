@@ -1,8 +1,9 @@
 """Google (Gemini) LLM provider.
 
-Supports:
-- API key auth (standard)
-- Vertex AI (GCP)
+Uses the unified Google Gen AI SDK (google-genai), which supports both
+the Gemini Developer API (API key) and Vertex AI (GCP).
+
+Replaces the deprecated google-generativeai package.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class GoogleProvider:
-    """Google Gemini provider."""
+    """Google Gemini provider using the google-genai SDK."""
 
     MODELS = [
         "gemini-2.5-pro",
@@ -32,12 +33,12 @@ class GoogleProvider:
         return "google"
 
     def _create_client(self):
-        """Create Google Generative AI client."""
+        """Create Google Gen AI client."""
         try:
-            import google.generativeai as genai
+            from google import genai
         except ImportError:
             raise ImportError(
-                "google-generativeai package required: pip install google-generativeai"
+                "google-genai package required: pip install google-genai"
             )
 
         api_key = self._config.resolve_api_key()
@@ -46,8 +47,7 @@ class GoogleProvider:
                 "Google API key not found. Set GOOGLE_API_KEY environment variable "
                 "or configure api_key_env in .laneswarm.toml"
             )
-        genai.configure(api_key=api_key)
-        return genai
+        return genai.Client(api_key=api_key)
 
     async def complete(
         self,
@@ -59,7 +59,7 @@ class GoogleProvider:
         system: str | None = None,
     ) -> LLMResponse:
         """Send completion request to Gemini."""
-        genai = self._client
+        from google.genai import types
 
         # Build system instruction
         system_instruction = system
@@ -68,42 +68,42 @@ class GoogleProvider:
             if system_msgs:
                 system_instruction = "\n\n".join(system_msgs)
 
-        gen_model = genai.GenerativeModel(
-            model_name=model,
-            system_instruction=system_instruction,
-            generation_config=genai.types.GenerationConfig(
+        # Convert messages to Gemini content format
+        contents = []
+        for msg in messages:
+            if msg.role == "system":
+                continue
+            role = "model" if msg.role == "assistant" else "user"
+            contents.append(
+                types.Content(
+                    role=role,
+                    parts=[types.Part(text=msg.content)],
+                )
+            )
+
+        response = self._client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
                 max_output_tokens=max_tokens,
                 temperature=temperature,
             ),
         )
 
-        # Convert messages to Gemini format
-        history = []
-        last_content = ""
-        for msg in messages:
-            if msg.role == "system":
-                continue
-            role = "model" if msg.role == "assistant" else "user"
-            if msg == messages[-1] and msg.role == "user":
-                last_content = msg.content
-            else:
-                history.append({"role": role, "parts": [msg.content]})
-
-        chat = gen_model.start_chat(history=history)
-        response = chat.send_message(last_content or "Continue.")
-
         # Parse response
         content = response.text or ""
         usage = TokenUsage()
         if hasattr(response, "usage_metadata") and response.usage_metadata:
+            um = response.usage_metadata
             usage = TokenUsage(
-                input_tokens=getattr(response.usage_metadata, "prompt_token_count", 0),
-                output_tokens=getattr(response.usage_metadata, "candidates_token_count", 0),
+                input_tokens=getattr(um, "prompt_token_count", 0),
+                output_tokens=getattr(um, "candidates_token_count", 0),
             )
 
         return LLMResponse(
             content=content,
-            tool_calls=[],  # Gemini tool calling handled differently; simplified for v1
+            tool_calls=[],
             usage=usage,
             model=model,
             stop_reason="stop",
