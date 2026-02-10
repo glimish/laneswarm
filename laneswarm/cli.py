@@ -29,6 +29,7 @@ from .providers import ProviderConfig, ProviderRegistry
 from .task_graph import TaskGraph, TaskStatus
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -270,8 +271,10 @@ def plan(ctx: click.Context, spec: str | None, file: str | None, interactive: bo
 
 @main.command()
 @click.option("--workers", "-w", type=int, help="Number of parallel workers")
+@click.option("--dashboard", "-d", is_flag=True, help="Launch live dashboard in browser")
+@click.option("--port", type=int, default=8420, help="Dashboard port (default: 8420)")
 @click.pass_context
-def run(ctx: click.Context, workers: int | None) -> None:
+def run(ctx: click.Context, workers: int | None, dashboard: bool, port: int) -> None:
     """Execute tasks from the task graph."""
     project_path = ctx.obj["project_path"]
     config = load_config(project_path)
@@ -297,6 +300,25 @@ def run(ctx: click.Context, workers: int | None) -> None:
     if task_graph is None:
         console.print("[red]No task graph found. Run 'laneswarm plan' first.[/red]")
         sys.exit(1)
+
+    # Start dashboard server if requested
+    dashboard_server = None
+    if dashboard:
+        try:
+            from .dashboard.server import DashboardServer
+
+            dashboard_server = DashboardServer(event_bus, task_graph)
+            dashboard_server.serve_background(host="0.0.0.0", port=port)
+            url = f"http://localhost:{port}"
+            console.print(f"[bold blue]Dashboard:[/bold blue] {url}")
+
+            import webbrowser
+            webbrowser.open(url)
+        except ImportError:
+            console.print(
+                "[yellow]Warning: websockets not installed. "
+                "Install with: pip install websockets>=12.0[/yellow]"
+            )
 
     console.print(
         f"\n[bold]Running {len(task_graph)} tasks "
@@ -432,6 +454,123 @@ def report(ctx: click.Context) -> None:
     console.print(f"  Total tokens:  {costs['total_tokens']:,}")
     console.print(f"  API calls:     {costs['api_calls']}")
     console.print(f"  Wall time:     {costs['wall_time_s']:.1f}s")
+
+
+@main.command()
+@click.option("--port", type=int, default=8420, help="Port to serve on (default: 8420)")
+@click.option("--run", "run_tasks", is_flag=True, help="Also execute the task graph")
+@click.option("--workers", "-w", type=int, help="Number of parallel workers (with --run)")
+@click.option("--host", default="0.0.0.0", help="Host to bind (default: 0.0.0.0)")
+@click.pass_context
+def serve(ctx: click.Context, port: int, run_tasks: bool, workers: int | None, host: str) -> None:
+    """Launch the real-time web dashboard.
+
+    Without --run, serves the dashboard showing the current/last task graph.
+    With --run, starts task execution and streams progress to the dashboard.
+    """
+    project_path = ctx.obj["project_path"]
+
+    try:
+        from .dashboard.server import DashboardServer
+    except ImportError:
+        console.print(
+            "[red]websockets library not installed.[/red]\n"
+            "Install with: [bold]pip install websockets>=12.0[/bold]"
+        )
+        sys.exit(1)
+
+    # Load task graph
+    from flanes.repo import Repository
+
+    try:
+        repo = Repository.find(project_path)
+    except Exception:
+        console.print("[red]No Flanes repository found at this path.[/red]")
+        sys.exit(1)
+
+    task_graph = load_task_graph(repo)
+    event_bus = EventBus()
+
+    url = f"http://localhost:{port}"
+    console.print(f"\n[bold blue]Laneswarm Dashboard[/bold blue]")
+    console.print(f"  URL: [link={url}]{url}[/link]")
+
+    if run_tasks:
+        if task_graph is None:
+            console.print("[red]No task graph found. Run 'laneswarm plan' first.[/red]")
+            sys.exit(1)
+
+        config = load_config(project_path)
+        if workers:
+            config.max_workers = workers
+        registry = _setup_registry(config)
+
+        console.print(f"  Tasks: {len(task_graph)}")
+        console.print(f"  Workers: {config.max_workers}")
+
+        # Start dashboard server in background
+        server = DashboardServer(event_bus, task_graph)
+        server.serve_background(host=host, port=port)
+
+        import webbrowser
+        webbrowser.open(url)
+
+        # Run the orchestrator (blocking)
+        orchestrator = Orchestrator(project_path, config, registry, event_bus)
+
+        import signal
+        prev_handler = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            summary = orchestrator.run(task_graph)
+        except Exception as e:
+            signal.signal(signal.SIGINT, prev_handler)
+            console.print(f"\n[red]Execution failed: {e}[/red]")
+            sys.exit(1)
+
+        signal.signal(signal.SIGINT, prev_handler)
+
+        # Persist updated task graph
+        try:
+            store_task_graph(repo, task_graph, agent_id="orchestrator")
+        except Exception as e:
+            logger.warning("Failed to persist task graph: %s", e)
+
+        # Display summary
+        console.print("\n[bold]Execution Complete[/bold]\n")
+        console.print(f"  Completed: [green]{summary['completed']}[/green]")
+        console.print(f"  Failed:    [red]{summary['failed']}[/red]")
+        console.print(f"  Tokens:    {summary['total_tokens']:,}")
+        console.print(f"  Time:      {summary['elapsed_seconds']:.1f}s")
+        console.print(f"\n  Dashboard still running at {url}")
+        console.print("  Press Ctrl+C to stop.")
+
+        # Keep the dashboard running after execution completes
+        try:
+            import signal as _sig
+            _sig.signal(_sig.SIGINT, _sig.default_int_handler)
+            while True:
+                import time as _time
+                _time.sleep(1)
+        except KeyboardInterrupt:
+            console.print("\n[dim]Dashboard stopped.[/dim]")
+    else:
+        # Serve-only mode: show current state
+        if task_graph is not None:
+            console.print(f"  Tasks: {len(task_graph)}")
+        else:
+            console.print("  [dim]No task graph loaded[/dim]")
+
+        server = DashboardServer(event_bus, task_graph)
+
+        import webbrowser
+        webbrowser.open(url)
+
+        console.print("\n  Press Ctrl+C to stop.\n")
+        try:
+            server.serve(host=host, port=port)
+        except KeyboardInterrupt:
+            console.print("\n[dim]Dashboard stopped.[/dim]")
 
 
 def _display_task_graph(task_graph: TaskGraph) -> None:

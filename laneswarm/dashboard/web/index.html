@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Laneswarm Dashboard</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <!-- Header -->
+    <header id="header">
+        <div class="header-left">
+            <h1>Laneswarm</h1>
+            <span id="connection-status" class="status-dot disconnected" title="Disconnected"></span>
+        </div>
+        <div class="header-center">
+            <div class="progress-bar-container">
+                <div id="progress-bar" class="progress-bar" style="width: 0%"></div>
+                <span id="progress-text" class="progress-text">0 / 0 tasks</span>
+            </div>
+        </div>
+        <div class="header-right">
+            <div class="stat-block">
+                <span class="stat-label">Tokens</span>
+                <span id="total-tokens" class="stat-value">0</span>
+            </div>
+            <div class="stat-block">
+                <span class="stat-label">Time</span>
+                <span id="total-time" class="stat-value">0s</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main>
+        <!-- Task Grid -->
+        <section id="task-grid-section">
+            <h2>Tasks</h2>
+            <div id="task-grid"></div>
+        </section>
+
+        <!-- Activity Feed -->
+        <aside id="activity-feed-section">
+            <div class="feed-header">
+                <h2>Activity</h2>
+                <select id="event-filter">
+                    <option value="all">All Events</option>
+                    <option value="task">Task Events</option>
+                    <option value="agent">Agent Events</option>
+                    <option value="review">Review Events</option>
+                    <option value="promote">Promote Events</option>
+                </select>
+            </div>
+            <div id="activity-feed"></div>
+        </aside>
+    </main>
+
+    <!-- Orchestrator Section -->
+    <section id="orchestrator-section">
+        <div class="orch-stats">
+            <div class="orch-stat">
+                <span class="orch-label">Pending</span>
+                <span id="orch-pending" class="orch-value">0</span>
+            </div>
+            <div class="orch-stat">
+                <span class="orch-label">Running</span>
+                <span id="orch-running" class="orch-value running">0</span>
+            </div>
+            <div class="orch-stat">
+                <span class="orch-label">Completed</span>
+                <span id="orch-completed" class="orch-value completed">0</span>
+            </div>
+            <div class="orch-stat">
+                <span class="orch-label">Failed</span>
+                <span id="orch-failed" class="orch-value failed">0</span>
+            </div>
+        </div>
+        <div id="dep-graph"></div>
+    </section>
+
+    <!-- Task Detail Modal -->
+    <div id="task-modal" class="modal hidden">
+        <div class="modal-backdrop"></div>
+        <div class="modal-content">
+            <button class="modal-close" onclick="closeModal()">&times;</button>
+            <div id="modal-body"></div>
+        </div>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>

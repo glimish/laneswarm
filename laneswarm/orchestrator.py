@@ -222,6 +222,14 @@ class Orchestrator:
         integrator_tokens: dict = {"tokens_in": 0, "tokens_out": 0}
 
         # Step 1: Code
+        task.current_phase = "coding"
+        task.agent_steps.append({
+            "phase": "coding",
+            "iteration": task.retries,
+            "timestamp": time.time(),
+            "summary": f"Starting coder with model {model_id}",
+        })
+
         session = create_agent_session(
             self.project_path, task, f"coder-{task.task_id}", model_id,
         )
@@ -261,6 +269,19 @@ class Orchestrator:
         total_tokens_in += coder_tokens["tokens_in"]
         total_tokens_out += coder_tokens["tokens_out"]
 
+        # Enrich task with coder results for dashboard
+        task.files_written = code_result.get("files_written", [])
+        task.verification_result = code_result.get("verification")
+        task.agent_steps.append({
+            "phase": "coding",
+            "iteration": task.retries,
+            "timestamp": time.time(),
+            "summary": (
+                f"Coder finished: {len(task.files_written)} files, "
+                f"{'success' if code_result.get('success') else 'failed'}"
+            ),
+        })
+
         # Get the transition ID from the work context
         coder_transition_id = None
         if work_ctx.result:
@@ -297,6 +318,14 @@ class Orchestrator:
                 )
 
         # Step 2: Review
+        task.current_phase = "reviewing"
+        task.agent_steps.append({
+            "phase": "reviewing",
+            "iteration": task.retries,
+            "timestamp": time.time(),
+            "summary": "Starting reviewer",
+        })
+
         reviewer_model = select_reviewer_model(self.config)
         reviewer = ReviewerAgent(
             repo_path=self.project_path,
@@ -318,7 +347,17 @@ class Orchestrator:
         total_tokens_in += reviewer_tokens["tokens_in"]
         total_tokens_out += reviewer_tokens["tokens_out"]
 
-        if not review_result.get("accepted"):
+        # Enrich task with review results for dashboard
+        task.review_summary = review_result.get("summary", "")
+        accepted = review_result.get("accepted", False)
+        task.agent_steps.append({
+            "phase": "reviewing",
+            "iteration": task.retries,
+            "timestamp": time.time(),
+            "summary": f"Review {'accepted' if accepted else 'rejected'}: {task.review_summary[:100]}",
+        })
+
+        if not accepted:
             # Store reviewer feedback so the coder can use it on retry
             llm_feedback = review_result.get("summary", "")
             task.last_review_feedback = llm_feedback[:500]
@@ -338,6 +377,14 @@ class Orchestrator:
         logger.debug("Task '%s' review accepted", task.task_id)
 
         # Step 3: Promote to main
+        task.current_phase = "promoting"
+        task.agent_steps.append({
+            "phase": "promoting",
+            "iteration": task.retries,
+            "timestamp": time.time(),
+            "summary": "Starting promote to main",
+        })
+
         integrator_model = select_integrator_model(self.config)
         integrator = IntegratorAgent(
             repo_path=self.project_path,
@@ -359,6 +406,13 @@ class Orchestrator:
         promote_transition_id = promote_result.get("transition_id")
 
         if promote_result.get("success"):
+            task.current_phase = "completed"
+            task.agent_steps.append({
+                "phase": "promoting",
+                "iteration": task.retries,
+                "timestamp": time.time(),
+                "summary": "Promoted to main successfully",
+            })
             logger.debug("Task '%s' promoted to main", task.task_id)
             task_graph.mark_completed(task.task_id, coder_transition_id)
             return {
@@ -372,6 +426,12 @@ class Orchestrator:
                 "integrator_tokens": integrator_tokens,
             }
         else:
+            task.agent_steps.append({
+                "phase": "promoting",
+                "iteration": task.retries,
+                "timestamp": time.time(),
+                "summary": f"Promote failed: {promote_result.get('error', 'conflicts')}",
+            })
             logger.debug(
                 "Task '%s' promote failed: %s", task.task_id,
                 promote_result.get("error", "conflicts"),

@@ -1,11 +1,15 @@
 """Event bus for real-time feedback.
 
 Callback-based: orchestrator publishes SwarmEvent objects,
-subscribers (CLI display, future web dashboard) receive them.
+subscribers (CLI display, web dashboard) receive them.
+
+Thread-safe: a lock protects the subscriber list and history so
+worker threads can safely publish events concurrently.
 """
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -78,32 +82,40 @@ EventCallback = Callable[[SwarmEvent], None]
 
 
 class EventBus:
-    """Simple callback-based event bus.
+    """Thread-safe callback-based event bus.
 
     Subscribers register callbacks that are invoked synchronously
-    when events are published. Thread-safe for publishing.
+    when events are published.  A lock protects the subscriber list
+    and event history so multiple worker threads can publish safely.
     """
 
     def __init__(self) -> None:
+        self._lock = threading.Lock()
         self._subscribers: list[EventCallback] = []
         self._history: list[SwarmEvent] = []
         self._max_history: int = 1000
 
     def subscribe(self, callback: EventCallback) -> None:
         """Subscribe to all events."""
-        self._subscribers.append(callback)
+        with self._lock:
+            self._subscribers.append(callback)
 
     def unsubscribe(self, callback: EventCallback) -> None:
         """Unsubscribe from events."""
-        self._subscribers = [s for s in self._subscribers if s is not callback]
+        with self._lock:
+            self._subscribers = [s for s in self._subscribers if s is not callback]
 
     def publish(self, event: SwarmEvent) -> None:
         """Publish an event to all subscribers."""
-        self._history.append(event)
-        if len(self._history) > self._max_history:
-            self._history = self._history[-self._max_history:]
+        with self._lock:
+            self._history.append(event)
+            if len(self._history) > self._max_history:
+                self._history = self._history[-self._max_history:]
+            # Snapshot the subscriber list under the lock so callbacks
+            # run outside the lock (avoids deadlocks if a callback publishes).
+            subscribers = list(self._subscribers)
 
-        for callback in self._subscribers:
+        for callback in subscribers:
             try:
                 callback(event)
             except Exception:
@@ -126,9 +138,11 @@ class EventBus:
 
     @property
     def history(self) -> list[SwarmEvent]:
-        """Get event history."""
-        return list(self._history)
+        """Get event history (returns a copy)."""
+        with self._lock:
+            return list(self._history)
 
     def clear_history(self) -> None:
         """Clear event history."""
-        self._history.clear()
+        with self._lock:
+            self._history.clear()

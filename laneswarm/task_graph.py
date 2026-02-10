@@ -48,6 +48,12 @@ class Task:
     last_review_feedback: str | None = None  # Reviewer feedback for retry
     tokens_used: int = 0
     wall_time_ms: float = 0.0
+    # Dashboard-enriched fields (populated during execution)
+    current_phase: str = ""  # "coding", "reviewing", "promoting", "completed"
+    agent_steps: list[dict] = field(default_factory=list)  # [{phase, iteration, timestamp, summary}]
+    files_written: list[str] = field(default_factory=list)  # Actual files produced by coder
+    verification_result: dict | None = None  # Last verification output
+    review_summary: str = ""  # Reviewer's LLM feedback (accepted/rejected + reason)
 
     def __post_init__(self) -> None:
         if not self.lane_name:
@@ -74,6 +80,11 @@ class Task:
             "last_review_feedback": self.last_review_feedback,
             "tokens_used": self.tokens_used,
             "wall_time_ms": self.wall_time_ms,
+            "current_phase": self.current_phase,
+            "agent_steps": self.agent_steps,
+            "files_written": self.files_written,
+            "verification_result": self.verification_result,
+            "review_summary": self.review_summary,
         }
 
     @classmethod
@@ -98,6 +109,11 @@ class Task:
             last_review_feedback=data.get("last_review_feedback"),
             tokens_used=data.get("tokens_used", 0),
             wall_time_ms=data.get("wall_time_ms", 0.0),
+            current_phase=data.get("current_phase", ""),
+            agent_steps=data.get("agent_steps", []),
+            files_written=data.get("files_written", []),
+            verification_result=data.get("verification_result"),
+            review_summary=data.get("review_summary", ""),
         )
 
 
