@@ -1,0 +1,386 @@
+"""Orchestrator: main loop managing task execution with ThreadPoolExecutor.
+
+The orchestrator:
+1. Reads the task graph (from Flanes or direct input)
+2. Schedules ready tasks (dependencies met) for parallel execution
+3. Spawns coder agents in worker threads
+4. Runs reviewer agents on completed work
+5. Promotes accepted work into main via integrator agents
+6. Reports progress via the event bus
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+from flanes.agent_sdk import AgentSession
+from flanes.repo import Repository
+
+from .agents.coder import CoderAgent
+from .agents.integrator import IntegratorAgent
+from .agents.reviewer import ReviewerAgent
+from .config import Config
+from .events import EventBus, EventType
+from .flanes_bridge import create_agent_session, create_lane_for_task, record_pipeline_costs
+from .model_selector import select_integrator_model, select_model, select_reviewer_model
+from .providers import ProviderRegistry
+from .task_graph import Task, TaskGraph, TaskStatus
+
+logger = logging.getLogger(__name__)
+
+
+class Orchestrator:
+    """Main orchestrator for Laneswarm task execution."""
+
+    def __init__(
+        self,
+        project_path: Path,
+        config: Config,
+        registry: ProviderRegistry,
+        event_bus: EventBus | None = None,
+    ) -> None:
+        self.project_path = project_path
+        self.config = config
+        self.registry = registry
+        self.event_bus = event_bus or EventBus()
+        self._repo = Repository.find(project_path)
+
+    def run(self, task_graph: TaskGraph) -> dict:
+        """Execute all tasks in the graph.
+
+        Returns a summary dict with counts and costs.
+        """
+        self.event_bus.emit(EventType.RUN_STARTED, total_tasks=len(task_graph))
+        start_time = time.time()
+
+        # Validate the graph
+        errors = task_graph.validate()
+        if errors:
+            raise ValueError(f"Invalid task graph: {'; '.join(errors)}")
+
+        # Main execution loop
+        total_tokens_in = 0
+        total_tokens_out = 0
+        completed = 0
+        failed = 0
+
+        with ThreadPoolExecutor(max_workers=self.config.max_workers) as pool:
+            active_futures: dict[Future, Task] = {}
+
+            while not task_graph.all_complete():
+                # Find ready tasks and submit them
+                ready = task_graph.get_ready_tasks()
+                for task in ready:
+                    if task.task_id not in {
+                        t.task_id for t in active_futures.values()
+                    }:
+                        # Create lane lazily — forks from latest main so
+                        # promoted dependency files are included.
+                        create_lane_for_task(self._repo, task, self.config)
+                        task_graph.mark_in_progress(task.task_id)
+                        future = pool.submit(self._execute_task, task, task_graph)
+                        active_futures[future] = task
+                        self.event_bus.emit(
+                            EventType.TASK_STARTED,
+                            task_id=task.task_id,
+                            model=select_model(task, self.config),
+                        )
+
+                if not active_futures:
+                    # No tasks ready and no tasks running — check for deadlock
+                    pending = [
+                        t for t in task_graph.tasks
+                        if t.status == TaskStatus.PENDING
+                    ]
+                    if pending:
+                        logger.error(
+                            "Deadlock: %d tasks pending but none ready. "
+                            "Check dependency graph.",
+                            len(pending),
+                        )
+                        for t in pending:
+                            task_graph.mark_failed(t.task_id, "Deadlocked")
+                            failed += 1
+                    break
+
+                # Wait for at least one task to complete
+                done_futures = []
+                for future in as_completed(active_futures):
+                    done_futures.append(future)
+                    break  # Process one at a time to check for new ready tasks
+
+                for future in done_futures:
+                    task = active_futures.pop(future)
+                    try:
+                        result = future.result()
+                        task_tokens = result.get("tokens_in", 0) + result.get("tokens_out", 0)
+                        task.tokens_used += task_tokens
+                        task.wall_time_ms += result.get("wall_time_ms", 0.0)
+                        total_tokens_in += result.get("tokens_in", 0)
+                        total_tokens_out += result.get("tokens_out", 0)
+
+                        if result.get("success"):
+                            completed += 1
+                            self.event_bus.emit(
+                                EventType.TASK_COMPLETED,
+                                task_id=task.task_id,
+                                tokens=task_tokens,
+                            )
+                        else:
+                            error = result.get("error") or "Unknown error"
+                            logger.warning(
+                                "Task '%s' failed: %s", task.task_id, error,
+                            )
+                            task_graph.mark_failed(task.task_id, error)
+                            if task.status == TaskStatus.PENDING:
+                                # Will be retried
+                                self.event_bus.emit(
+                                    EventType.TASK_RETRYING,
+                                    task_id=task.task_id,
+                                    retry=task.retries,
+                                    error=error,
+                                )
+                            else:
+                                failed += 1
+                                self.event_bus.emit(
+                                    EventType.TASK_FAILED,
+                                    task_id=task.task_id,
+                                    error=error,
+                                )
+                    except Exception as e:
+                        logger.error("Task '%s' raised exception: %s", task.task_id, e)
+                        task_graph.mark_failed(task.task_id, str(e))
+                        failed += 1
+                        self.event_bus.emit(
+                            EventType.TASK_FAILED,
+                            task_id=task.task_id,
+                            error=str(e),
+                        )
+
+                # Emit progress
+                self.event_bus.emit(
+                    EventType.PROGRESS_UPDATE,
+                    **task_graph.progress(),
+                )
+
+        elapsed = time.time() - start_time
+
+        summary = {
+            "completed": completed,
+            "failed": failed,
+            "total": len(task_graph),
+            "tokens_in": total_tokens_in,
+            "tokens_out": total_tokens_out,
+            "total_tokens": total_tokens_in + total_tokens_out,
+            "elapsed_seconds": elapsed,
+        }
+
+        self.event_bus.emit(EventType.RUN_COMPLETED, **summary)
+        return summary
+
+    def _execute_task(self, task: Task, task_graph: TaskGraph) -> dict:
+        """Execute a single task: code → review → promote.
+
+        Runs in a worker thread. Creates its own Repository instance
+        for thread safety.
+        """
+        task_start = time.time()
+        result = self._execute_task_inner(task, task_graph)
+        wall_time_ms = (time.time() - task_start) * 1000
+        result["wall_time_ms"] = wall_time_ms
+
+        # Record costs on Flanes transitions so flanes history shows them
+        if result.get("coder_transition_id"):
+            try:
+                thread_repo = Repository(self.project_path)
+                record_pipeline_costs(
+                    repo=thread_repo,
+                    coder_transition_id=result.get("coder_transition_id"),
+                    reviewer_tokens=result.get("reviewer_tokens", {}),
+                    wall_time_ms=wall_time_ms,
+                )
+            except Exception as e:
+                logger.debug("Failed to record pipeline costs: %s", e)
+
+        return result
+
+    def _execute_task_inner(self, task: Task, task_graph: TaskGraph) -> dict:
+        """Inner implementation of task execution (code → review → promote)."""
+        # Each thread gets its own Repository
+        thread_repo = Repository(self.project_path)
+        model_id = select_model(task, self.config)
+
+        total_tokens_in = 0
+        total_tokens_out = 0
+
+        # Per-step token tracking for Flanes cost recording
+        coder_tokens: dict = {"tokens_in": 0, "tokens_out": 0}
+        reviewer_tokens: dict = {"tokens_in": 0, "tokens_out": 0}
+        integrator_tokens: dict = {"tokens_in": 0, "tokens_out": 0}
+
+        # Step 1: Code
+        session = create_agent_session(
+            self.project_path, task, f"coder-{task.task_id}", model_id,
+        )
+
+        coder = CoderAgent(
+            repo_path=self.project_path,
+            agent_id=f"coder-{task.task_id}",
+            agent_type="coder",
+            model_id=model_id,
+            registry=self.registry,
+            event_bus=self.event_bus,
+            lane=task.lane_name,
+            workspace=task.lane_name,
+        )
+
+        workspace_path = thread_repo.workspace_path(task.lane_name)
+        if workspace_path is None:
+            return {"success": False, "error": f"No workspace for lane '{task.lane_name}'"}
+
+        with session.work(
+            prompt=f"Implement: {task.title}",
+            tags=["laneswarm-task", task.task_id],
+            auto_accept=False,
+        ) as work_ctx:
+            code_result = coder.run(task, task_graph, work_ctx.path)
+
+            # Record token usage in the session
+            work_ctx.record_tokens(
+                tokens_in=code_result.get("tokens_in", 0),
+                tokens_out=code_result.get("tokens_out", 0),
+            )
+
+        coder_tokens = {
+            "tokens_in": code_result.get("tokens_in", 0),
+            "tokens_out": code_result.get("tokens_out", 0),
+        }
+        total_tokens_in += coder_tokens["tokens_in"]
+        total_tokens_out += coder_tokens["tokens_out"]
+
+        # Get the transition ID from the work context
+        coder_transition_id = None
+        if work_ctx.result:
+            coder_transition_id = work_ctx.result.get("transition_id")
+
+        if not code_result.get("success"):
+            logger.debug(
+                "Task '%s' coder failed: %s", task.task_id,
+                code_result.get("error") or "Coder produced no files",
+            )
+            return {
+                "success": False,
+                "tokens_in": total_tokens_in,
+                "tokens_out": total_tokens_out,
+                "error": code_result.get("error") or "Coder produced no files",
+            }
+
+        logger.debug(
+            "Task '%s' coder succeeded: %d files",
+            task.task_id, len(code_result.get("files_written", [])),
+        )
+
+        # Extract verification summary from coder (coder does internal verification)
+        verification_summary = None
+        coder_verification = code_result.get("verification")
+        if coder_verification:
+            verification_summary = coder_verification.get("summary")
+            if coder_verification.get("passed"):
+                logger.debug("Task '%s' verification passed", task.task_id)
+            else:
+                logger.debug(
+                    "Task '%s' verification issues: %s",
+                    task.task_id, (verification_summary or "")[:200],
+                )
+
+        # Step 2: Review
+        reviewer_model = select_reviewer_model(self.config)
+        reviewer = ReviewerAgent(
+            repo_path=self.project_path,
+            agent_id=f"reviewer-{task.task_id}",
+            agent_type="reviewer",
+            model_id=reviewer_model,
+            registry=self.registry,
+            event_bus=self.event_bus,
+        )
+
+        review_result = reviewer.review(
+            task, thread_repo, coder_transition_id,
+            verification_summary=verification_summary,
+        )
+        reviewer_tokens = {
+            "tokens_in": review_result.get("tokens_in", 0),
+            "tokens_out": review_result.get("tokens_out", 0),
+        }
+        total_tokens_in += reviewer_tokens["tokens_in"]
+        total_tokens_out += reviewer_tokens["tokens_out"]
+
+        if not review_result.get("accepted"):
+            # Store reviewer feedback so the coder can use it on retry
+            llm_feedback = review_result.get("summary", "")
+            task.last_review_feedback = llm_feedback[:500]
+            logger.debug(
+                "Task '%s' review rejected: %s", task.task_id,
+                llm_feedback[:300],
+            )
+            return {
+                "success": False,
+                "tokens_in": total_tokens_in,
+                "tokens_out": total_tokens_out,
+                "error": f"Review rejected: {llm_feedback[:200]}",
+                "coder_transition_id": coder_transition_id,
+                "reviewer_tokens": reviewer_tokens,
+            }
+
+        logger.debug("Task '%s' review accepted", task.task_id)
+
+        # Step 3: Promote to main
+        integrator_model = select_integrator_model(self.config)
+        integrator = IntegratorAgent(
+            repo_path=self.project_path,
+            agent_id=f"integrator-{task.task_id}",
+            agent_type="integrator",
+            model_id=integrator_model,
+            registry=self.registry,
+            event_bus=self.event_bus,
+        )
+
+        promote_result = integrator.promote(task, thread_repo)
+        integrator_tokens = {
+            "tokens_in": promote_result.get("tokens_in", 0),
+            "tokens_out": promote_result.get("tokens_out", 0),
+        }
+        total_tokens_in += integrator_tokens["tokens_in"]
+        total_tokens_out += integrator_tokens["tokens_out"]
+
+        promote_transition_id = promote_result.get("transition_id")
+
+        if promote_result.get("success"):
+            logger.debug("Task '%s' promoted to main", task.task_id)
+            task_graph.mark_completed(task.task_id, coder_transition_id)
+            return {
+                "success": True,
+                "tokens_in": total_tokens_in,
+                "tokens_out": total_tokens_out,
+                "coder_transition_id": coder_transition_id,
+                "promote_transition_id": promote_transition_id,
+                "coder_tokens": coder_tokens,
+                "reviewer_tokens": reviewer_tokens,
+                "integrator_tokens": integrator_tokens,
+            }
+        else:
+            logger.debug(
+                "Task '%s' promote failed: %s", task.task_id,
+                promote_result.get("error", "conflicts"),
+            )
+            return {
+                "success": False,
+                "tokens_in": total_tokens_in,
+                "tokens_out": total_tokens_out,
+                "error": f"Promote failed: {promote_result.get('error', 'conflicts')}",
+                "coder_transition_id": coder_transition_id,
+                "reviewer_tokens": reviewer_tokens,
+            }

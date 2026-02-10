@@ -1,0 +1,61 @@
+# Laneswarm Configuration
+# Copy this file to .laneswarm.toml and customize
+
+# --- Providers ---
+# Configure one or more LLM providers.
+# Auth modes: "api_key", "subscription", "vertex", "bedrock", "azure"
+
+[providers.anthropic]
+auth = "api_key"
+api_key_env = "ANTHROPIC_API_KEY"
+# For Vertex AI: auth = "vertex", vertex_project = "my-gcp-project", vertex_region = "us-east5"
+# For Bedrock:  auth = "bedrock", bedrock_region = "us-east-1"
+
+[providers.openai]
+auth = "api_key"
+api_key_env = "OPENAI_API_KEY"
+# For Azure: auth = "azure", azure_endpoint = "https://my.openai.azure.com", azure_api_key_env = "AZURE_OPENAI_KEY"
+
+[providers.google]
+auth = "api_key"
+api_key_env = "GOOGLE_API_KEY"
+
+# [providers.ollama]
+# base_url = "http://localhost:11434"
+
+# --- Model Assignments ---
+# Format: "provider/model-name"
+# Mix providers per role for cost optimization
+
+[models]
+planner = "anthropic/claude-opus-4-6"
+coder_high = "anthropic/claude-opus-4-6"
+coder_medium = "anthropic/claude-sonnet-4-5-20250929"
+coder_low = "openai/gpt-4o-mini"
+reviewer = "anthropic/claude-sonnet-4-5-20250929"
+integrator = "anthropic/claude-sonnet-4-5-20250929"
+
+# --- Execution ---
+max_workers = 4
+max_retries = 3
+
+# --- Budget (per lane/task) ---
+[budget]
+max_tokens_in = 500000
+max_tokens_out = 200000
+max_api_calls = 100
+max_wall_time_ms = 3600000  # 1 hour
+
+# --- Evaluators ---
+# Shell commands run against each workspace before accepting transitions
+
+# [[evaluators]]
+# name = "lint"
+# args = ["ruff", "check", "."]
+# required = true
+
+# [[evaluators]]
+# name = "typecheck"
+# args = ["mypy", "."]
+# required = false
+# timeout_seconds = 120
