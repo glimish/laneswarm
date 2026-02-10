@@ -99,6 +99,9 @@ function updateFromEvent(event) {
             task.status = 'completed';
             task.current_phase = 'completed';
             if (event.data.tokens) task.tokens_used += event.data.tokens;
+            if (event.data.files_written) task.files_written = event.data.files_written;
+            if (event.data.wall_time_ms) task.wall_time_ms = event.data.wall_time_ms;
+            recalcCosts();
             state.progress.completed = (state.progress.completed || 0) + 1;
             if (prevStatus === 'in_progress') state.progress.in_progress = Math.max(0, (state.progress.in_progress || 0) - 1);
             renderTaskCard(task);
@@ -138,6 +141,14 @@ function updateFromEvent(event) {
                 state.costs.total_tokens = event.data.total_tokens;
             }
             break;
+        case 'run_completed':
+            if (event.data.total_tokens !== undefined) {
+                state.costs.total_tokens = event.data.total_tokens;
+            }
+            if (event.data.elapsed_seconds !== undefined) {
+                state.costs.total_wall_ms = event.data.elapsed_seconds * 1000;
+            }
+            break;
     }
 }
 
@@ -154,6 +165,18 @@ function recalcProgress() {
         else if (t.status === 'blocked') p.blocked++;
     }
     state.progress = p;
+}
+
+function recalcCosts() {
+    // Recount from actual task data — authoritative source of truth
+    let totalTokens = 0;
+    let totalWallMs = 0;
+    for (const t of state.tasks) {
+        totalTokens += (t.tokens_used || 0);
+        totalWallMs += (t.wall_time_ms || 0);
+    }
+    state.costs.total_tokens = totalTokens;
+    state.costs.total_wall_ms = totalWallMs;
 }
 
 function renderAll() {

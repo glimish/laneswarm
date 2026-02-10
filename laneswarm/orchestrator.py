@@ -128,6 +128,8 @@ class Orchestrator:
                                 EventType.TASK_COMPLETED,
                                 task_id=task.task_id,
                                 tokens=task_tokens,
+                                wall_time_ms=task.wall_time_ms,
+                                files_written=task.files_written,
                             )
                         else:
                             error = result.get("error") or "Unknown error"
