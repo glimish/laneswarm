@@ -30,9 +30,6 @@ laneswarm = "laneswarm.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["laneswarm"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"laneswarm/dashboard/web" = "laneswarm/dashboard/web"
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
