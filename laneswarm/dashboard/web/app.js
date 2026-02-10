@@ -84,10 +84,15 @@ function updateFromEvent(event) {
     const task = state.tasks.find(t => t.task_id === taskId);
     if (!task) return;
 
+    // Track previous status to correctly adjust counters
+    const prevStatus = task.status;
+
     switch (event.event_type) {
         case 'task_started':
             task.status = 'in_progress';
             task.current_phase = 'coding';
+            state.progress.in_progress = (state.progress.in_progress || 0) + 1;
+            if (prevStatus === 'pending') state.progress.pending = Math.max(0, (state.progress.pending || 0) - 1);
             renderTaskCard(task);
             break;
         case 'task_completed':
@@ -95,14 +100,14 @@ function updateFromEvent(event) {
             task.current_phase = 'completed';
             if (event.data.tokens) task.tokens_used += event.data.tokens;
             state.progress.completed = (state.progress.completed || 0) + 1;
-            state.progress.in_progress = Math.max(0, (state.progress.in_progress || 0) - 1);
+            if (prevStatus === 'in_progress') state.progress.in_progress = Math.max(0, (state.progress.in_progress || 0) - 1);
             renderTaskCard(task);
             break;
         case 'task_failed':
             task.status = 'failed';
             task.error_message = event.data.error || 'Unknown error';
             state.progress.failed = (state.progress.failed || 0) + 1;
-            state.progress.in_progress = Math.max(0, (state.progress.in_progress || 0) - 1);
+            if (prevStatus === 'in_progress') state.progress.in_progress = Math.max(0, (state.progress.in_progress || 0) - 1);
             renderTaskCard(task);
             break;
         case 'task_retrying':
@@ -138,7 +143,21 @@ function updateFromEvent(event) {
 
 // ── Rendering ──────────────────────────────────────────────
 
+function recalcProgress() {
+    // Recount from actual task statuses — authoritative source of truth
+    const p = { total: state.tasks.length, pending: 0, in_progress: 0, completed: 0, failed: 0, blocked: 0 };
+    for (const t of state.tasks) {
+        if (t.status === 'pending') p.pending++;
+        else if (t.status === 'in_progress') p.in_progress++;
+        else if (t.status === 'completed') p.completed++;
+        else if (t.status === 'failed') p.failed++;
+        else if (t.status === 'blocked') p.blocked++;
+    }
+    state.progress = p;
+}
+
 function renderAll() {
+    recalcProgress();
     renderTaskGrid();
     renderActivityFeed();
     renderProgress();
