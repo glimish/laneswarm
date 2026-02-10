@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "laneswarm"
-version = "0.1.1"
+version = "0.1.2"
 description = "Multi-agent autonomous coding system powered by Flanes version control"
 readme = "README.md"
 license = "MIT"
