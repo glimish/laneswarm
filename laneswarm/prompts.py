@@ -320,6 +320,185 @@ Return a JSON task graph:
 ```
 """
 
+PLANNER_ANALYZE_PROMPT = """\
+You are a project analysis agent. Given a project specification, identify \
+the core requirements and constraints.
+
+## Output Format
+
+Return ONLY a JSON code block:
+
+```json
+{
+  "objective": "One-sentence summary of what the project does",
+  "core_features": ["feature1", "feature2", ...],
+  "constraints": ["constraint1", "constraint2", ...],
+  "unknowns": ["ambiguity1", "ambiguity2", ...],
+  "capabilities_needed": ["web_server", "database", "websockets", ...],
+  "suggested_framework": "flask|fastapi|aiohttp|express|django|none",
+  "complexity_estimate": "small|medium|large"
+}
+```
+
+Be specific and concrete. List actual technology choices, not vague descriptions. \
+If the spec is ambiguous, list the unknowns but make reasonable default choices.
+"""
+
+PLANNER_RESEARCH_PROMPT = """\
+You are a project research agent. Given an analysis of a project and a list \
+of existing project files, identify which files/modules are relevant and what \
+patterns exist in the codebase.
+
+## Output Format
+
+Return ONLY a JSON code block:
+
+```json
+{
+  "relevant_files": [
+    {"path": "src/app.py", "relevance": "Main entry point, needs modification"}
+  ],
+  "existing_patterns": {
+    "import_style": "relative imports within package",
+    "naming_convention": "snake_case for functions, PascalCase for classes",
+    "framework_patterns": "Flask with blueprints"
+  },
+  "dependencies": ["flask", "sqlalchemy", "websockets"],
+  "reusable_components": ["existing auth module at src/auth.py"],
+  "integration_points": ["REST API at /api/", "WebSocket at /ws"]
+}
+```
+
+Focus on patterns that affect how new code should be written. If no existing \
+files are provided, infer the ideal structure from the analysis.
+"""
+
+PLANNER_STRUCTURE_PROMPT = """\
+You are a project architecture agent. Given the analysis and research, design \
+the high-level plan structure: phases, ordering constraints, and parallelization \
+opportunities.
+
+## Output Format
+
+Return ONLY a JSON code block:
+
+```json
+{
+  "project_structure": [
+    "src/",
+    "src/__init__.py",
+    "src/app.py",
+    "tests/"
+  ],
+  "phases": [
+    {
+      "name": "Infrastructure",
+      "description": "Project setup, config, and shared modules",
+      "depends_on": [],
+      "parallelizable": false
+    },
+    {
+      "name": "Core Features",
+      "description": "Main application logic",
+      "depends_on": ["Infrastructure"],
+      "parallelizable": true
+    }
+  ],
+  "ordering_constraints": [
+    "__init__.py files must be created before any module that uses relative imports",
+    "Database models must exist before API routes"
+  ],
+  "max_parallelism": 4
+}
+```
+
+Design for maximum parallelism. Infrastructure tasks (setup, config, \
+__init__.py files) come first with no dependencies. Feature tasks should \
+be as independent as possible.
+"""
+
+PLANNER_DECOMPOSE_PROMPT = """\
+You are a task decomposition agent. Given the analysis, research, and plan \
+structure, decompose the project into concrete implementable tasks.
+
+## Task Design Rules
+
+- Each task should be completable by a single LLM call (focused scope)
+- Tasks should create 1-5 files each
+- Minimize dependencies to maximize parallelism
+- Infrastructure tasks first with no dependencies
+- Use wide dependency graphs (A->B, A->C, A->D) not chains (A->B->C->D)
+- The first task MUST create __init__.py for every Python package
+- Include a runnable entry point (run.py or __main__.py)
+- First task should create requirements.txt or pyproject.toml
+
+## CRITICAL: Interface Contracts
+
+Multiple agents work in parallel. Define EXACT names for every shared symbol \
+in conventions and shared_interfaces. Also define protocol_contracts, \
+state_machines, and wiring_map for cross-task communication.
+
+## Output Format
+
+Return ONLY a JSON code block with the FULL task graph structure:
+
+```json
+{
+  "project_structure": ["src/", "src/__init__.py", ...],
+  "conventions": {"naming": "exact naming rules"},
+  "shared_interfaces": [{"name": "symbol", "type": "class", "module": "path", "signature": "..."}],
+  "protocol_contracts": [],
+  "state_machines": [],
+  "wiring_map": [],
+  "tasks": [
+    {
+      "task_id": "001",
+      "title": "...",
+      "description": "...",
+      "dependencies": [],
+      "files_to_create": ["..."],
+      "files_to_read": [],
+      "estimated_complexity": "low|medium|high",
+      "evaluators": ["lint"]
+    }
+  ]
+}
+```
+"""
+
+PLANNER_VALIDATE_PROMPT = """\
+You are a task graph validation agent. Review the task graph for structural \
+issues and correct them.
+
+## Checks to Perform
+
+1. **Missing dependencies**: Does any task reference files created by another \
+   task without listing it as a dependency?
+2. **Circular dependencies**: Are there any cycles in the dependency graph?
+3. **Unreachable tasks**: Are there tasks whose dependencies can never be met?
+4. **Oversized tasks**: Are there tasks creating more than 5 files?
+5. **Missing __init__.py**: Does the first task create all needed __init__.py files?
+6. **Missing entry point**: Is there a runnable entry point (run.py or __main__.py)?
+7. **Wiring consistency**: Do all protocol_contracts have valid producer/consumer tasks?
+8. **Interface completeness**: Is every cross-task symbol in shared_interfaces?
+
+## Output Format
+
+Return ONLY a JSON code block:
+
+```json
+{
+  "valid": true,
+  "issues": [],
+  "task_graph": { ... the complete corrected task graph ... }
+}
+```
+
+If issues are found, set valid to false, list the issues, and provide a \
+corrected task_graph with the fixes applied. If the graph is valid, return \
+it unchanged in task_graph.
+"""
+
 SMOKER_DIAGNOSIS_PROMPT = """\
 You are a smoke-test diagnosis agent. Your job is to analyze failed runtime \
 smoke tests and identify the root cause.
