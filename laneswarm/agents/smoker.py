@@ -66,8 +66,13 @@ _FRAMEWORK_PATTERNS: list[tuple[re.Pattern, str]] = [
 
 # Entry point candidates (searched in order)
 _PYTHON_ENTRY_POINTS = [
-    "run.py", "main.py", "app.py", "server.py", "manage.py",
-    "wsgi.py", "asgi.py",
+    "run.py",
+    "main.py",
+    "app.py",
+    "server.py",
+    "manage.py",
+    "wsgi.py",
+    "asgi.py",
 ]
 _NODE_ENTRY_POINTS = ["index.js", "server.js", "app.js"]
 
@@ -121,8 +126,15 @@ _STATIC_PATTERNS = [
 
 # Directories to skip during scanning
 _SKIP_DIRS = {
-    ".flanes", ".git", "__pycache__", "node_modules",
-    ".venv", "venv", ".pytest_cache", ".env", ".tox",
+    ".flanes",
+    ".git",
+    "__pycache__",
+    "node_modules",
+    ".venv",
+    "venv",
+    ".pytest_cache",
+    ".env",
+    ".tox",
 }
 
 
@@ -163,6 +175,30 @@ class SmokerAgent(BaseAgent):
                 "summary": f"Smoke test crashed: {e}",
             }
 
+        # Enforce overall smoke test budget
+        elapsed = time.time() - smoke_start
+        if elapsed > TOTAL_SMOKE_TIMEOUT:
+            logger.warning(
+                "Smoke test exceeded budget: %.1fs > %ds",
+                elapsed,
+                TOTAL_SMOKE_TIMEOUT,
+            )
+            if result.get("passed"):
+                result["passed"] = False
+                result["checks"].append(
+                    {
+                        "name": "timeout_budget",
+                        "passed": False,
+                        "detail": (
+                            f"Smoke test exceeded {TOTAL_SMOKE_TIMEOUT}s budget "
+                            f"(took {elapsed:.1f}s)"
+                        ),
+                    }
+                )
+                result["summary"] = (
+                    f"Smoke test budget exceeded ({elapsed:.1f}s > {TOTAL_SMOKE_TIMEOUT}s)"
+                )
+
         elapsed = time.time() - smoke_start
         result["elapsed_seconds"] = round(elapsed, 1)
 
@@ -182,15 +218,20 @@ class SmokerAgent(BaseAgent):
         return result
 
     def _run_smoke_test(
-        self, project_path: Path, task_graph: TaskGraph,
+        self,
+        project_path: Path,
+        task_graph: TaskGraph,
     ) -> dict:
         """Inner smoke test implementation."""
         # Step 1: Detect app type
         app_info = _detect_app(project_path)
         logger.info(
             "Detected app: framework=%s entry=%s port=%d routes=%d ws=%d",
-            app_info.framework, app_info.entry_point, app_info.port,
-            len(app_info.routes), len(app_info.ws_endpoints),
+            app_info.framework,
+            app_info.entry_point,
+            app_info.port,
+            len(app_info.routes),
+            len(app_info.ws_endpoints),
         )
 
         if app_info.entry_point is None:
@@ -198,11 +239,13 @@ class SmokerAgent(BaseAgent):
                 "passed": True,  # No entry point — nothing to run
                 "app_type": app_info.framework,
                 "entry_point": None,
-                "checks": [{
-                    "name": "app_detection",
-                    "passed": True,
-                    "detail": "No runnable entry point detected; skipping smoke tests",
-                }],
+                "checks": [
+                    {
+                        "name": "app_detection",
+                        "passed": True,
+                        "detail": "No runnable entry point detected; skipping smoke tests",
+                    }
+                ],
                 "diagnosis": None,
                 "summary": "No entry point detected — smoke tests skipped.",
             }
@@ -215,20 +258,24 @@ class SmokerAgent(BaseAgent):
             # Step 2: Set up isolated environment
             venv_path = _setup_env(project_path, app_info)
             if venv_path:
-                checks.append({
-                    "name": "env_setup",
-                    "passed": True,
-                    "detail": "Dependencies installed in isolated venv",
-                })
+                checks.append(
+                    {
+                        "name": "env_setup",
+                        "passed": True,
+                        "detail": "Dependencies installed in isolated venv",
+                    }
+                )
 
             # Step 3: Start server
             server_proc = _start_server(project_path, app_info, venv_path)
             if server_proc is None:
-                checks.append({
-                    "name": "server_start",
-                    "passed": False,
-                    "detail": "Failed to start server subprocess",
-                })
+                checks.append(
+                    {
+                        "name": "server_start",
+                        "passed": False,
+                        "detail": "Failed to start server subprocess",
+                    }
+                )
                 return self._build_result(app_info, checks, project_path)
 
             # Step 4: Wait for port
@@ -242,32 +289,37 @@ class SmokerAgent(BaseAgent):
                         stderr = (stderr or "").strip()
                 except Exception:
                     pass
-                checks.append({
-                    "name": "server_start",
-                    "passed": False,
-                    "detail": f"Server did not bind to port {app_info.port} "
-                              f"within {SERVER_STARTUP_TIMEOUT}s. "
-                              f"stderr: {stderr[:500]}",
-                })
+                checks.append(
+                    {
+                        "name": "server_start",
+                        "passed": False,
+                        "detail": f"Server did not bind to port {app_info.port} "
+                        f"within {SERVER_STARTUP_TIMEOUT}s. "
+                        f"stderr: {stderr[:500]}",
+                    }
+                )
                 return self._build_result(app_info, checks, project_path)
 
-            checks.append({
-                "name": "server_start",
-                "passed": True,
-                "detail": f"Server started and listening on port {app_info.port}",
-            })
+            checks.append(
+                {
+                    "name": "server_start",
+                    "passed": True,
+                    "detail": f"Server started and listening on port {app_info.port}",
+                }
+            )
 
             # Step 4b: Fetch OpenAPI routes for FastAPI apps
             if app_info.framework == "fastapi":
                 openapi_routes = _fetch_openapi_routes(app_info.port)
                 if openapi_routes:
                     logger.info(
-                        "OpenAPI spec: %d routes discovered", len(openapi_routes),
+                        "OpenAPI spec: %d routes discovered",
+                        len(openapi_routes),
                     )
                     app_info.routes = list(openapi_routes.keys())
                     app_info.route_methods = openapi_routes
                 else:
-                    logger.info("OpenAPI fetch failed; using regex-detected routes")
+                    logger.debug("OpenAPI fetch failed; using regex-detected routes")
 
             # Step 5: HTTP smoke tests
             http_checks = _run_http_checks(app_info.port, app_info)
@@ -282,14 +334,25 @@ class SmokerAgent(BaseAgent):
             # Always clean up — capture stderr before killing for diagnosis
             server_stderr = ""
             if server_proc is not None:
-                _kill_server(server_proc)
+                # Try to read stderr before killing (non-blocking)
                 try:
-                    _, stderr_bytes = server_proc.communicate(timeout=3)
-                    server_stderr = (stderr_bytes or b"").decode(
-                        "utf-8", errors="replace"
-                    )[:2000]
+                    if server_proc.stderr and server_proc.poll() is not None:
+                        stderr_bytes = server_proc.stderr.read()
+                        server_stderr = (stderr_bytes or b"").decode("utf-8", errors="replace")[
+                            :2000
+                        ]
                 except Exception:
                     pass
+                _kill_server(server_proc)
+                # If we didn't capture stderr above, try after kill
+                if not server_stderr:
+                    try:
+                        _, stderr_bytes = server_proc.communicate(timeout=2)
+                        server_stderr = (stderr_bytes or b"").decode("utf-8", errors="replace")[
+                            :2000
+                        ]
+                    except Exception:
+                        pass
             if venv_path is not None:
                 _cleanup_venv(venv_path)
 
@@ -350,8 +413,7 @@ class SmokerAgent(BaseAgent):
             return None
 
         checks_text = "\n".join(
-            f"- {c['name']}: {'PASS' if c['passed'] else 'FAIL'} — {c['detail']}"
-            for c in checks
+            f"- {c['name']}: {'PASS' if c['passed'] else 'FAIL'} — {c['detail']}" for c in checks
         )
 
         # Read the entry point file for context
@@ -363,7 +425,9 @@ class SmokerAgent(BaseAgent):
                     content = ep.read_text(errors="replace")
                     if len(content) > 5000:
                         content = content[:5000] + "\n... (truncated)"
-                    entry_content = f"\n## Entry Point ({app_info.entry_point})\n```\n{content}\n```"
+                    entry_content = (
+                        f"\n## Entry Point ({app_info.entry_point})\n```\n{content}\n```"
+                    )
                 except Exception:
                     pass
 
@@ -396,6 +460,7 @@ class SmokerAgent(BaseAgent):
 # App detection
 # ---------------------------------------------------------------------------
 
+
 def _detect_app(project_path: Path) -> AppInfo:
     """Scan project files to detect app type, entry point, port, routes."""
     info = AppInfo()
@@ -422,9 +487,7 @@ def _detect_app(project_path: Path) -> AppInfo:
     file_contents: dict[str, str] = {}
     for f in py_files + js_files:
         try:
-            file_contents[str(f.relative_to(project_path))] = f.read_text(
-                errors="replace"
-            )
+            file_contents[str(f.relative_to(project_path))] = f.read_text(errors="replace")
         except Exception:
             pass
 
@@ -444,9 +507,7 @@ def _detect_app(project_path: Path) -> AppInfo:
         return info
 
     # Find entry point
-    entry_candidates = (
-        _PYTHON_ENTRY_POINTS if info.is_python else _NODE_ENTRY_POINTS
-    )
+    entry_candidates = _PYTHON_ENTRY_POINTS if info.is_python else _NODE_ENTRY_POINTS
     for name in entry_candidates:
         if (project_path / name).is_file():
             info.entry_point = name
@@ -507,8 +568,8 @@ def _fetch_openapi_routes(port: int) -> dict[str, list[str]] | None:
     or None on any failure (404, timeout, bad JSON).
     """
     import json
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     url = f"http://127.0.0.1:{port}/openapi.json"
     try:
@@ -541,6 +602,7 @@ def _fetch_openapi_routes(port: int) -> dict[str, list[str]] | None:
 # ---------------------------------------------------------------------------
 # Environment setup
 # ---------------------------------------------------------------------------
+
 
 def _setup_env(project_path: Path, app_info: AppInfo) -> Path | None:
     """Create an isolated venv and install dependencies.
@@ -583,21 +645,30 @@ def _setup_env(project_path: Path, app_info: AppInfo) -> Path | None:
     try:
         if app_info.requirements_file == "pyproject.toml":
             # pip install . for pyproject.toml
-            subprocess.run(
+            result = subprocess.run(
                 [str(pip_path), "install", "."],
                 capture_output=True,
                 timeout=INSTALL_TIMEOUT,
                 cwd=str(project_path),
             )
         else:
-            subprocess.run(
+            result = subprocess.run(
                 [str(pip_path), "install", "-r", str(req_path)],
                 capture_output=True,
                 timeout=INSTALL_TIMEOUT,
                 cwd=str(project_path),
             )
+
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"pip install failed (exit {result.returncode}): {stderr}")
     except subprocess.TimeoutExpired:
         logger.warning("pip install timed out after %ds", INSTALL_TIMEOUT)
+        shutil.rmtree(venv_dir, ignore_errors=True)
+        raise RuntimeError(f"pip install timed out after {INSTALL_TIMEOUT}s")
+    except RuntimeError:
+        shutil.rmtree(venv_dir, ignore_errors=True)
+        raise
     except Exception as e:
         logger.warning("pip install failed: %s", e)
 
@@ -608,6 +679,16 @@ def _setup_env(project_path: Path, app_info: AppInfo) -> Path | None:
 # Server lifecycle
 # ---------------------------------------------------------------------------
 
+
+def _check_port_available(port: int) -> None:
+    """Raise RuntimeError if the port is already in use."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            raise RuntimeError(f"Port {port} already in use — cannot start smoke test server")
+    except (ConnectionRefusedError, OSError, TimeoutError):
+        pass  # Port is free — expected case
+
+
 def _start_server(
     project_path: Path,
     app_info: AppInfo,
@@ -616,6 +697,9 @@ def _start_server(
     """Start the server as a subprocess."""
     if app_info.entry_point is None:
         return None
+
+    # Pre-check: ensure port is available
+    _check_port_available(app_info.port)
 
     # Determine the python/node executable
     if app_info.is_python:
@@ -633,9 +717,7 @@ def _start_server(
     env = os.environ.copy()
     # Add project path to PYTHONPATH so local imports work
     existing = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = str(project_path) + (
-        os.pathsep + existing if existing else ""
-    )
+    env["PYTHONPATH"] = str(project_path) + (os.pathsep + existing if existing else "")
 
     try:
         proc = subprocess.Popen(
@@ -690,10 +772,9 @@ def _cleanup_venv(venv_path: Path) -> None:
 # HTTP smoke checks
 # ---------------------------------------------------------------------------
 
+
 def _run_http_checks(port: int, app_info: AppInfo) -> list[dict]:
     """Run HTTP checks against the server, respecting per-route methods."""
-    import urllib.request
-    import urllib.error
 
     checks: list[dict] = []
     base_url = f"http://127.0.0.1:{port}"
@@ -716,9 +797,7 @@ def _run_http_checks(port: int, app_info: AppInfo) -> list[dict]:
         elif methods:
             # No GET — use the first available method
             method = methods[0]
-            checks.append(
-                _http_request(base_url + route, method, f"http_route:{route}")
-            )
+            checks.append(_http_request(base_url + route, method, f"http_route:{route}"))
         else:
             # No method info — fall back to GET (existing behavior)
             checks.append(_http_get(base_url + route, f"http_route:{route}"))
@@ -736,8 +815,8 @@ def _run_http_checks(port: int, app_info: AppInfo) -> list[dict]:
 
 def _http_get(url: str, check_name: str) -> dict:
     """Perform a single HTTP GET and return a check result."""
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     try:
         req = urllib.request.Request(url, method="GET")
@@ -746,18 +825,14 @@ def _http_get(url: str, check_name: str) -> dict:
             body = resp.read(4096).decode("utf-8", errors="replace")
 
             if status == 200:
-                if body.strip():
-                    return {
-                        "name": check_name,
-                        "passed": True,
-                        "detail": f"HTTP {status}, {len(body)} bytes",
-                    }
-                else:
-                    return {
-                        "name": check_name,
-                        "passed": False,
-                        "detail": f"HTTP {status} but empty body",
-                    }
+                detail = f"HTTP {status}, {len(body)} bytes"
+                if not body.strip():
+                    detail = f"HTTP {status}, empty body (ok)"
+                return {
+                    "name": check_name,
+                    "passed": True,
+                    "detail": detail,
+                }
             else:
                 return {
                     "name": check_name,
@@ -787,8 +862,8 @@ def _http_request(url: str, method: str, check_name: str) -> dict:
     just missing required fields).
     """
     import json
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     body = None
     headers = {}
@@ -797,8 +872,7 @@ def _http_request(url: str, method: str, check_name: str) -> dict:
         headers["Content-Type"] = "application/json"
 
     try:
-        req = urllib.request.Request(url, method=method.upper(), data=body,
-                                     headers=headers)
+        req = urllib.request.Request(url, method=method.upper(), data=body, headers=headers)
         with urllib.request.urlopen(req, timeout=HTTP_REQUEST_TIMEOUT) as resp:
             status = resp.status
             resp_body = resp.read(4096).decode("utf-8", errors="replace")
@@ -840,6 +914,7 @@ def _http_request(url: str, method: str, check_name: str) -> dict:
 # WebSocket smoke checks
 # ---------------------------------------------------------------------------
 
+
 def _run_ws_checks(port: int, app_info: AppInfo) -> list[dict]:
     """Run WebSocket handshake checks."""
     checks: list[dict] = []
@@ -856,7 +931,6 @@ def _ws_handshake(port: int, endpoint: str) -> dict:
 
     Uses a raw HTTP upgrade request — no websockets library needed.
     """
-    import hashlib
     import base64
 
     check_name = f"ws_handshake:{endpoint}"
