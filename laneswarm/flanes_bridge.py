@@ -228,6 +228,63 @@ def build_focused_prompt(
                     f"in `{iface.get('module', '')}`: "
                     f"`{iface.get('signature', '')}`"
                 )
+
+        # Protocol contracts (filtered to this task)
+        if task_graph.protocol_contracts:
+            relevant_contracts = [
+                c for c in task_graph.protocol_contracts
+                if c.get("producer_task") == task.task_id
+                or task.task_id in c.get("consumer_tasks", [])
+            ]
+            if relevant_contracts:
+                contract_parts.append("\n### Protocol Contracts (Your Task)")
+                contract_parts.append(
+                    "You MUST use these EXACT message types and data shapes. "
+                    "Do NOT invent your own message names or change the data "
+                    "structure."
+                )
+                for pc in relevant_contracts:
+                    role = (
+                        "PRODUCE"
+                        if pc.get("producer_task") == task.task_id
+                        else "CONSUME"
+                    )
+                    channel = pc.get("channel", "unknown")
+                    data_shape = pc.get("data_shape", {})
+                    contract_parts.append(
+                        f"- **`{pc['name']}`** [{role}] via {channel}: "
+                        f"`{data_shape}`"
+                    )
+
+        # State machines (filtered to this task)
+        if task_graph.state_machines:
+            relevant_sms = [
+                sm for sm in task_graph.state_machines
+                if task.task_id in sm.get("relevant_tasks", [])
+            ]
+            if relevant_sms:
+                contract_parts.append("\n### State Machines")
+                contract_parts.append(
+                    "Your code must respect these state definitions and "
+                    "transitions exactly."
+                )
+                for sm in relevant_sms:
+                    states_str = ", ".join(
+                        f"`{s}`" for s in sm.get("states", [])
+                    )
+                    contract_parts.append(
+                        f"- **{sm['name']}** in "
+                        f"`{sm.get('module', '')}`: "
+                        f"states=[{states_str}]"
+                    )
+                    for tr in sm.get("transitions", []):
+                        contract_parts.append(
+                            f"  - `{tr.get('from', '?')}` → "
+                            f"`{tr.get('to', '?')}` on "
+                            f"{tr.get('trigger', '?')} "
+                            f"(message: `{tr.get('message_type', 'N/A')}`)"
+                        )
+
         parts.append(
             "## CRITICAL: Interface Contracts\n\n"
             "These conventions were defined by the project planner. "

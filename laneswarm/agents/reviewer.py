@@ -17,7 +17,7 @@ from flanes.repo import Repository
 from ..events import EventType
 from ..prompts import REVIEWER_SYSTEM_PROMPT
 from ..providers import Message
-from ..task_graph import Task
+from ..task_graph import Task, TaskGraph
 from .base import BaseAgent
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,7 @@ class ReviewerAgent(BaseAgent):
         repo: Repository,
         transition_id: str | None = None,
         verification_summary: str | None = None,
+        task_graph: TaskGraph | None = None,
     ) -> dict:
         """Review the work done on a task.
 
@@ -94,11 +95,18 @@ class ReviewerAgent(BaseAgent):
                         f"{verification_summary}\n\n"
                     )
 
+                contracts_section = ""
+                if task_graph:
+                    contracts_section = _build_contracts_section(
+                        task, task_graph
+                    )
+
                 review_prompt = (
                     f"## Task: {task.title}\n\n"
                     f"{task.description}\n\n"
                     f"## Evaluator Results\n{evaluator_summary}\n\n"
                     f"{verification_section}"
+                    f"{contracts_section}"
                     f"## Created/Modified Files\n{files_text}\n\n"
                     "Review the files above. Are they correct and complete "
                     "for the task description? Respond with ACCEPT or REJECT followed "
@@ -223,3 +231,57 @@ def _format_diff(diff: dict) -> str:
         parts.append(f"\n({unchanged} unchanged files)")
 
     return "\n".join(parts) if parts else "(no changes detected)"
+
+
+def _build_contracts_section(task: Task, task_graph: TaskGraph) -> str:
+    """Build a contracts compliance section for the reviewer prompt.
+
+    Includes shared interfaces and protocol contracts relevant to this task
+    so the reviewer can check the coder's output complies with them.
+    """
+    parts: list[str] = []
+
+    # Shared interfaces relevant to this task
+    if task_graph.shared_interfaces:
+        relevant_ifaces = [
+            iface for iface in task_graph.shared_interfaces
+            if iface.get("module", "") in task.files_to_create
+        ]
+        if relevant_ifaces:
+            parts.append("## Interface Contracts (Check Compliance)")
+            parts.append(
+                "The coder MUST have used these exact names and signatures:"
+            )
+            for iface in relevant_ifaces:
+                parts.append(
+                    f"- **{iface.get('name', '?')}** in "
+                    f"`{iface.get('module', '')}`: "
+                    f"`{iface.get('signature', '')}`"
+                )
+
+    # Protocol contracts relevant to this task
+    if task_graph.protocol_contracts:
+        relevant = [
+            c for c in task_graph.protocol_contracts
+            if c.get("producer_task") == task.task_id
+            or task.task_id in c.get("consumer_tasks", [])
+        ]
+        if relevant:
+            parts.append("\n## Protocol Contracts (Check Compliance)")
+            parts.append(
+                "Verify the code uses these EXACT message types and data shapes:"
+            )
+            for pc in relevant:
+                role = (
+                    "produces"
+                    if pc.get("producer_task") == task.task_id
+                    else "consumes"
+                )
+                parts.append(
+                    f"- **`{pc['name']}`** (this task {role}): "
+                    f"data_shape=`{pc.get('data_shape', {})}`"
+                )
+
+    if not parts:
+        return ""
+    return "\n".join(parts) + "\n\n"

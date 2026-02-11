@@ -129,6 +129,15 @@ class TaskGraph:
         # Planner-generated interface contracts (injected into every coder prompt)
         self.conventions: dict[str, str] = {}
         self.shared_interfaces: list[dict] = []
+        # Protocol-level contracts for cross-task communication
+        # Each entry: {name, direction, producer_task, consumer_tasks, data_shape, channel}
+        self.protocol_contracts: list[dict] = []
+        # State machine definitions for stateful components
+        # Each entry: {name, module, states, transitions, relevant_tasks}
+        self.state_machines: list[dict] = []
+        # Producer→consumer wiring map for cross-task artifacts
+        # Each entry: {artifact, artifact_type, produced_by, consumed_by, defined_in, used_in}
+        self.wiring_map: list[dict] = []
         if tasks:
             for task in tasks:
                 self.add_task(task)
@@ -156,7 +165,14 @@ class TaskGraph:
         return list(self._tasks.keys())
 
     def validate(self) -> list[str]:
-        """Validate the graph. Returns a list of errors (empty if valid)."""
+        """Validate structural integrity of the graph.
+
+        Returns a list of errors (empty if valid).  Only checks
+        structural issues (missing dependencies, cycles) that would
+        prevent execution.  Wiring metadata issues (bad task IDs in
+        protocol_contracts / wiring_map) are advisory — call
+        ``validate_wiring()`` separately to get those warnings.
+        """
         errors = []
 
         # Check for missing dependencies
@@ -172,6 +188,55 @@ class TaskGraph:
             cycle = self._detect_cycle()
             if cycle:
                 errors.append(f"Dependency cycle detected: {' -> '.join(cycle)}")
+
+        return errors
+
+    def validate_wiring(self) -> list[str]:
+        """Validate protocol contracts and wiring map references.
+
+        Checks that all task IDs referenced in contracts exist in the graph.
+        Returns a list of error messages.
+        """
+        errors = []
+
+        for pc in self.protocol_contracts:
+            name = pc.get("name", "?")
+            producer = pc.get("producer_task", "")
+            if producer and producer not in self._tasks:
+                errors.append(
+                    f"Protocol contract '{name}' references non-existent "
+                    f"producer task '{producer}'"
+                )
+            for consumer in pc.get("consumer_tasks", []):
+                if consumer not in self._tasks:
+                    errors.append(
+                        f"Protocol contract '{name}' references non-existent "
+                        f"consumer task '{consumer}'"
+                    )
+
+        for sm in self.state_machines:
+            name = sm.get("name", "?")
+            for task_id in sm.get("relevant_tasks", []):
+                if task_id not in self._tasks:
+                    errors.append(
+                        f"State machine '{name}' references non-existent "
+                        f"task '{task_id}'"
+                    )
+
+        for wm in self.wiring_map:
+            artifact = wm.get("artifact", "?")
+            produced_by = wm.get("produced_by", "")
+            if produced_by and produced_by not in self._tasks:
+                errors.append(
+                    f"Wiring map entry '{artifact}' references non-existent "
+                    f"producer task '{produced_by}'"
+                )
+            for consumer in wm.get("consumed_by", []):
+                if consumer not in self._tasks:
+                    errors.append(
+                        f"Wiring map entry '{artifact}' references non-existent "
+                        f"consumer task '{consumer}'"
+                    )
 
         return errors
 
@@ -297,14 +362,19 @@ class TaskGraph:
 
     def to_json(self) -> str:
         """Serialize entire graph to JSON."""
-        return json.dumps(
-            {
-                "conventions": self.conventions,
-                "shared_interfaces": self.shared_interfaces,
-                "tasks": [task.to_dict() for task in self._tasks.values()],
-            },
-            indent=2,
-        )
+        data = {
+            "conventions": self.conventions,
+            "shared_interfaces": self.shared_interfaces,
+            "tasks": [task.to_dict() for task in self._tasks.values()],
+        }
+        # Include protocol-level contracts if present
+        if self.protocol_contracts:
+            data["protocol_contracts"] = self.protocol_contracts
+        if self.state_machines:
+            data["state_machines"] = self.state_machines
+        if self.wiring_map:
+            data["wiring_map"] = self.wiring_map
+        return json.dumps(data, indent=2)
 
     @classmethod
     def from_json(cls, data: str) -> TaskGraph:
@@ -314,6 +384,9 @@ class TaskGraph:
         graph = cls(tasks)
         graph.conventions = parsed.get("conventions", {})
         graph.shared_interfaces = parsed.get("shared_interfaces", [])
+        graph.protocol_contracts = parsed.get("protocol_contracts", [])
+        graph.state_machines = parsed.get("state_machines", [])
+        graph.wiring_map = parsed.get("wiring_map", [])
         return graph
 
     def __len__(self) -> int:

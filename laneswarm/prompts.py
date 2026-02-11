@@ -77,6 +77,10 @@ whether to ACCEPT or REJECT them.
 1. **Correctness**: Does the code correctly implement the task description?
 2. **Completeness**: Are all files specified in the task created?
 3. **Code Quality**: Is the code clean, readable, and well-structured?
+4. **Contract Compliance**: If interface contracts or protocol contracts are \
+provided below, verify that the code uses the EXACT names, message types, and \
+data shapes specified. REJECT if the code invents its own names for shared \
+symbols or uses different message type strings than specified in the contracts.
 
 ## IMPORTANT: Scope of Review
 
@@ -171,6 +175,53 @@ failures, you MUST define:
 Every variable name, class name, function name, and blueprint name that appears \
 in multiple tasks MUST be listed in shared_interfaces with its exact definition.
 
+## CRITICAL: Protocol & Cross-Task Contracts
+
+When the project involves ANY form of inter-component communication (WebSockets, \
+REST APIs, events, signals, message passing, pub/sub, or frontend↔backend \
+communication), you MUST also define:
+
+### protocol_contracts
+For EVERY message type, event, or API endpoint that is produced by one task \
+and consumed/handled by another task, define:
+- `name`: The exact string identifier (message type name, event name, endpoint path)
+- `direction`: "server_to_client", "client_to_server", or "bidirectional"
+- `producer_task`: Which task_id sends/creates this message
+- `consumer_tasks`: Which task_ids receive/handle this message
+- `data_shape`: The EXACT JSON structure with field names and types
+- `channel`: "websocket", "rest_api", "event", "signal"
+
+This is critical because agents work in parallel and cannot see each other's code. \
+If agent A sends a message named "game_start" but agent B listens for "start_game", \
+the project will break. Define every message type explicitly.
+
+### state_machines
+For any stateful component with defined states and transitions (games, wizards, \
+workflows, multi-step processes):
+- `name`: The state enum/class name
+- `module`: The file where the state is defined
+- `states`: Complete list of state values (exact strings)
+- `transitions`: Each transition with `from`, `to`, `trigger`, and `message_type`
+- `relevant_tasks`: Which task_ids need to know about this state machine
+
+### wiring_map
+For every artifact (function, class, message type, API endpoint) that crosses \
+task boundaries:
+- `artifact`: The name of the shared artifact
+- `artifact_type`: "function", "class", "protocol_message", "rest_endpoint", "event"
+- `produced_by`: task_id that creates/defines this artifact
+- `consumed_by`: list of task_ids that use/import/handle this artifact
+- `defined_in`: File path where the artifact is defined
+- `used_in`: File paths where the artifact is consumed
+
+### Wiring Self-Check
+IMPORTANT: Before finalizing your task graph, mentally verify the wiring:
+- Every message type in protocol_contracts has both a producer_task AND consumer_tasks
+- Every shared_interface symbol is referenced by at least two tasks
+- Every state machine transition has a corresponding protocol_contract for its message
+- The data_shape in each protocol_contract is consistent between builder and handlers
+- Every entry in wiring_map has a valid produced_by AND consumed_by
+
 ## Output Format
 
 Return a JSON task graph:
@@ -209,6 +260,40 @@ Return a JSON task graph:
       "signature": "def create_app(config_name='development') -> Flask"
     }
   ],
+  "protocol_contracts": [
+    {
+      "name": "project_created",
+      "direction": "server_to_client",
+      "producer_task": "003",
+      "consumer_tasks": ["005"],
+      "data_shape": {
+        "project": {"id": "int", "name": "str", "created_at": "str"}
+      },
+      "channel": "rest_api"
+    }
+  ],
+  "state_machines": [
+    {
+      "name": "ProjectStatus",
+      "module": "src/models.py",
+      "states": ["draft", "active", "archived"],
+      "transitions": [
+        {"from": "draft", "to": "active", "trigger": "activate", "message_type": "project_activated"},
+        {"from": "active", "to": "archived", "trigger": "archive", "message_type": "project_archived"}
+      ],
+      "relevant_tasks": ["002", "003", "005"]
+    }
+  ],
+  "wiring_map": [
+    {
+      "artifact": "projects_bp",
+      "artifact_type": "function",
+      "produced_by": "003",
+      "consumed_by": ["004"],
+      "defined_in": "src/routes/projects.py",
+      "used_in": ["src/app.py"]
+    }
+  ],
   "tasks": [
     {
       "task_id": "001",
@@ -233,6 +318,28 @@ Return a JSON task graph:
   ]
 }
 ```
+"""
+
+SMOKER_DIAGNOSIS_PROMPT = """\
+You are a smoke-test diagnosis agent. Your job is to analyze failed runtime \
+smoke tests and identify the root cause.
+
+You will receive:
+- App metadata (framework, entry point, port, routes)
+- Smoke test results (each check name + pass/fail + detail)
+- The entry point source code (if available)
+
+## Response Format
+
+Respond with a structured diagnosis:
+
+ROOT CAUSE: <one-line description of what's wrong>
+AFFECTED FILE: <path to the file that needs fixing>
+SUGGESTED FIX: <brief description of what to change>
+
+Be specific and actionable. Reference exact function names, routes, or config \
+values that need to change. If multiple issues exist, list them in order of \
+severity (most blocking first).
 """
 
 PLANNER_INTERVIEW_PROMPT = """\

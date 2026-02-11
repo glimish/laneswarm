@@ -81,10 +81,15 @@ class Planner:
         # Parse the task graph from the response
         task_graph = _parse_task_graph(response.content)
 
-        # Validate
+        # Validate structural integrity
         errors = task_graph.validate()
         if errors:
-            logger.warning("Task graph validation errors: %s", errors)
+            logger.warning("Task graph structural errors: %s", errors)
+
+        # Check wiring metadata (advisory — logged but not blocking)
+        wiring_warnings = task_graph.validate_wiring()
+        if wiring_warnings:
+            logger.warning("Task graph wiring warnings: %s", wiring_warnings)
 
         # Create folder structure
         _create_folder_structure(self.project_path, response.content)
@@ -194,6 +199,11 @@ def _parse_task_graph(content: str) -> TaskGraph:
     # Extract interface contracts from planner output
     graph.conventions = data.get("conventions", {})
     graph.shared_interfaces = data.get("shared_interfaces", [])
+
+    # Extract protocol-level contracts (new fields — backward compatible)
+    graph.protocol_contracts = data.get("protocol_contracts", [])
+    graph.state_machines = data.get("state_machines", [])
+    graph.wiring_map = data.get("wiring_map", [])
 
     return graph
 

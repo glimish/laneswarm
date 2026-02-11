@@ -107,8 +107,11 @@ class CoderAgent(BaseAgent):
                     continue
                 break
 
-            # Verify the written files
-            verification_result = verify_workspace(workspace_path, files_written)
+            # Verify the written files (including contract compliance if available)
+            verification_result = verify_workspace(
+                workspace_path, files_written,
+                task_graph=task_graph, task=task,
+            )
 
             if verification_result["passed"]:
                 self.log.info(
