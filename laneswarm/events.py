@@ -41,8 +41,14 @@ class EventType(str, Enum):
     PROMOTE_COMPLETED = "promote_completed"
     PROMOTE_CONFLICT = "promote_conflict"
 
-    # Orchestrator
+    # Planning
     PLAN_CREATED = "plan_created"
+    PLANNING_STARTED = "planning_started"
+    PLANNING_PHASE_STARTED = "planning_phase_started"
+    PLANNING_PHASE_COMPLETED = "planning_phase_completed"
+    PLANNING_COMPLETED = "planning_completed"
+
+    # Orchestrator
     RUN_STARTED = "run_started"
     RUN_COMPLETED = "run_completed"
     PROGRESS_UPDATE = "progress_update"
@@ -120,7 +126,7 @@ class EventBus:
         with self._lock:
             self._history.append(event)
             if len(self._history) > self._max_history:
-                self._history = self._history[-self._max_history:]
+                self._history = self._history[-self._max_history :]
             # Snapshot the subscriber list under the lock so callbacks
             # run outside the lock (avoids deadlocks if a callback publishes).
             subscribers = list(self._subscribers)
@@ -139,12 +145,14 @@ class EventBus:
         **data: Any,
     ) -> None:
         """Convenience method to create and publish an event."""
-        self.publish(SwarmEvent(
-            event_type=event_type,
-            task_id=task_id,
-            agent_id=agent_id,
-            data=data,
-        ))
+        self.publish(
+            SwarmEvent(
+                event_type=event_type,
+                task_id=task_id,
+                agent_id=agent_id,
+                data=data,
+            )
+        )
 
     @property
     def history(self) -> list[SwarmEvent]:

@@ -1,10 +1,13 @@
-"""Planner agent: interactive CLI conversation that generates a task graph.
+"""Planner agent: staged planning that generates a task graph.
 
-The planner:
-1. Reads the user's project spec (from argument or interactive input)
-2. Interviews the user for clarification
-3. Generates folder structure and task dependency graph
-4. Stores everything in Flanes
+The planner runs 5 sequential phases, each making a focused LLM call
+and emitting events for real-time progress:
+
+1. Analyze  — Understand the spec: objective, constraints, unknowns
+2. Research — Identify relevant files, patterns, dependencies
+3. Structure — Design phases, ordering, parallelism opportunities
+4. Decompose — Break into concrete tasks with full interface contracts
+5. Validate — Check for structural issues and fix them
 """
 
 from __future__ import annotations
@@ -13,22 +16,35 @@ import json
 import logging
 from pathlib import Path
 
-from flanes.repo import Repository
-from flanes.state import AgentIdentity
-
 from .config import Config
 from .events import EventBus, EventType
 from .flanes_bridge import init_project, store_task_graph
 from .model_selector import select_planner_model
-from .prompts import PLANNER_INTERVIEW_PROMPT, PLANNER_SYSTEM_PROMPT
+from .prompts import (
+    PLANNER_ANALYZE_PROMPT,
+    PLANNER_DECOMPOSE_PROMPT,
+    PLANNER_RESEARCH_PROMPT,
+    PLANNER_STRUCTURE_PROMPT,
+    PLANNER_SYSTEM_PROMPT,
+    PLANNER_VALIDATE_PROMPT,
+)
 from .providers import Message, ProviderRegistry
 from .task_graph import Task, TaskGraph
 
 logger = logging.getLogger(__name__)
 
+# Phase definitions: (name, display label, prompt, max_tokens)
+_PHASES = [
+    ("analyze", "Analyzing project spec", PLANNER_ANALYZE_PROMPT, 2048),
+    ("research", "Researching codebase", PLANNER_RESEARCH_PROMPT, 2048),
+    ("structure", "Structuring plan", PLANNER_STRUCTURE_PROMPT, 2048),
+    ("decompose", "Decomposing into tasks", PLANNER_DECOMPOSE_PROMPT, 16384),
+    ("validate", "Validating task graph", PLANNER_VALIDATE_PROMPT, 4096),
+]
+
 
 class Planner:
-    """Interactive planner that generates a task graph from a project spec."""
+    """Staged planner that generates a task graph from a project spec."""
 
     def __init__(
         self,
@@ -47,57 +63,131 @@ class Planner:
     async def plan(self, spec: str) -> TaskGraph:
         """Generate a task graph from a project specification.
 
-        This is the main entry point. For interactive mode, use plan_interactive().
+        Runs 5 sequential phases, each emitting events for progress.
+        For interactive mode, use plan_interactive().
         """
         # Initialize Flanes repo
         repo = init_project(self.project_path, self.config)
 
-        self.event_bus.emit(EventType.PLAN_CREATED, spec_length=len(spec))
+        self.event_bus.emit(EventType.PLANNING_STARTED, spec_length=len(spec))
 
-        # Send spec to the planner LLM
-        self._conversation = [
-            Message(
-                role="user",
-                content=(
-                    f"Here is the project specification:\n\n{spec}\n\n"
-                    "Generate a task graph for this project. "
-                    "Return ONLY a single JSON code block (```json ... ```) "
-                    "containing the full task graph with project_structure, "
-                    "conventions, shared_interfaces, and tasks. "
-                    "Do NOT include any explanation or discussion — "
-                    "ONLY the JSON code block."
-                ),
-            ),
-        ]
+        # Scan existing project files for context
+        file_listing = _scan_project_files(self.project_path)
 
-        response = await self.registry.complete(
-            model_id=self.model_id,
-            messages=self._conversation,
-            max_tokens=16384,
-            system=PLANNER_SYSTEM_PROMPT,
-            temperature=0.0,
+        # Phase 1: Analyze
+        analysis = await self._run_phase(
+            0,
+            spec,
+            f"Here is the project specification:\n\n{spec}",
         )
 
-        # Parse the task graph from the response
-        task_graph = _parse_task_graph(response.content)
+        # Phase 2: Research
+        research_context = (
+            f"## Analysis Result\n```json\n{json.dumps(analysis, indent=2)}\n```\n\n"
+            f"## Existing Project Files\n{file_listing or '(empty project)'}"
+        )
+        research = await self._run_phase(1, spec, research_context)
+
+        # Phase 3: Structure
+        structure_context = (
+            f"## Project Spec\n{spec}\n\n"
+            f"## Analysis\n```json\n{json.dumps(analysis, indent=2)}\n```\n\n"
+            f"## Research\n```json\n{json.dumps(research, indent=2)}\n```"
+        )
+        structure = await self._run_phase(2, spec, structure_context)
+
+        # Phase 4: Decompose
+        decompose_context = (
+            f"## Project Spec\n{spec}\n\n"
+            f"## Analysis\n```json\n{json.dumps(analysis, indent=2)}\n```\n\n"
+            f"## Research\n```json\n{json.dumps(research, indent=2)}\n```\n\n"
+            f"## Plan Structure\n```json\n{json.dumps(structure, indent=2)}\n```"
+        )
+        task_graph_data = await self._run_phase(3, spec, decompose_context)
+
+        # Phase 5: Validate
+        validate_context = (
+            f"## Task Graph to Validate\n```json\n{json.dumps(task_graph_data, indent=2)}\n```"
+        )
+        validation = await self._run_phase(4, spec, validate_context)
+
+        # Use validated graph if available, otherwise use decompose output
+        final_data = validation.get("task_graph", task_graph_data)
+        if not final_data.get("tasks"):
+            final_data = task_graph_data
+
+        # Parse into TaskGraph
+        task_graph = _parse_task_graph_data(final_data)
 
         # Validate structural integrity
         errors = task_graph.validate()
         if errors:
             logger.warning("Task graph structural errors: %s", errors)
 
-        # Check wiring metadata (advisory — logged but not blocking)
+        # Check wiring metadata (advisory)
         wiring_warnings = task_graph.validate_wiring()
         if wiring_warnings:
             logger.warning("Task graph wiring warnings: %s", wiring_warnings)
 
         # Create folder structure
-        _create_folder_structure(self.project_path, response.content)
+        structure_list = final_data.get("project_structure", [])
+        _create_folder_structure(self.project_path, structure_list)
 
         # Store in Flanes
         store_task_graph(repo, task_graph)
 
+        self.event_bus.emit(
+            EventType.PLANNING_COMPLETED,
+            total_tasks=len(task_graph),
+        )
+        self.event_bus.emit(EventType.PLAN_CREATED, spec_length=len(spec))
+
         return task_graph
+
+    async def _run_phase(
+        self,
+        phase_index: int,
+        spec: str,
+        user_content: str,
+    ) -> dict:
+        """Run a single planning phase: emit events, call LLM, parse JSON."""
+        name, label, prompt, max_tokens = _PHASES[phase_index]
+        total = len(_PHASES)
+
+        self.event_bus.emit(
+            EventType.PLANNING_PHASE_STARTED,
+            phase=name,
+            label=label,
+            index=phase_index + 1,
+            total=total,
+        )
+
+        messages = [Message(role="user", content=user_content)]
+
+        response = await self.registry.complete(
+            model_id=self.model_id,
+            messages=messages,
+            max_tokens=max_tokens,
+            system=prompt,
+            temperature=0.0,
+        )
+
+        result = _extract_json(response.content)
+        if result is None:
+            logger.warning(
+                "Phase '%s' returned no parseable JSON, using empty dict",
+                name,
+            )
+            result = {}
+
+        self.event_bus.emit(
+            EventType.PLANNING_PHASE_COMPLETED,
+            phase=name,
+            index=phase_index + 1,
+            total=total,
+        )
+
+        return result
 
     def plan_sync(self, spec: str) -> TaskGraph:
         """Synchronous wrapper for plan()."""
@@ -116,6 +206,8 @@ class Planner:
         """
         from rich.console import Console
         from rich.prompt import Prompt
+
+        from .prompts import PLANNER_INTERVIEW_PROMPT
 
         console = Console()
         console.print("\n[bold]Laneswarm Project Planner[/bold]\n")
@@ -157,42 +249,53 @@ class Planner:
         return "\n\n".join(spec_parts)
 
 
-def _parse_task_graph(content: str) -> TaskGraph:
-    """Parse a task graph from LLM response content.
+def _scan_project_files(project_path: Path) -> str:
+    """Scan the project directory for existing files and return a listing."""
+    skip_dirs = {
+        ".flanes",
+        ".git",
+        "__pycache__",
+        "node_modules",
+        ".venv",
+        "venv",
+        ".pytest_cache",
+        ".env",
+        ".tox",
+    }
+    files: list[str] = []
+    try:
+        for f in sorted(project_path.rglob("*")):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(project_path)
+            if any(part in skip_dirs for part in rel.parts):
+                continue
+            files.append(str(rel).replace("\\", "/"))
+    except Exception:
+        pass
 
-    Extracts JSON from the response (may be wrapped in markdown code blocks).
-    """
-    logger.debug(
-        "Raw planner response (%d chars): %.500s%s",
-        len(content), content, "..." if len(content) > 500 else "",
-    )
+    if not files:
+        return ""
+    return "\n".join(f"- {f}" for f in files[:200])
 
-    data = _extract_json(content)
 
-    if data is None:
-        logger.error(
-            "Could not extract JSON from planner response. "
-            "Full LLM response (first 2000 chars): %s",
-            content[:2000] if content else "(empty response)",
-        )
-        raise ValueError(
-            "Could not parse task graph from LLM response: "
-            "no valid JSON found in response"
-        )
-
+def _parse_task_graph_data(data: dict) -> TaskGraph:
+    """Parse a task graph from a dict (already extracted JSON)."""
     tasks_data = data.get("tasks", [])
     tasks = []
     for t in tasks_data:
-        tasks.append(Task(
-            task_id=t["task_id"],
-            title=t["title"],
-            description=t["description"],
-            dependencies=t.get("dependencies", []),
-            files_to_create=t.get("files_to_create", []),
-            files_to_read=t.get("files_to_read", []),
-            estimated_complexity=t.get("estimated_complexity", "medium"),
-            evaluators=t.get("evaluators", []),
-        ))
+        tasks.append(
+            Task(
+                task_id=t["task_id"],
+                title=t["title"],
+                description=t["description"],
+                dependencies=t.get("dependencies", []),
+                files_to_create=t.get("files_to_create", []),
+                files_to_read=t.get("files_to_read", []),
+                estimated_complexity=t.get("estimated_complexity", "medium"),
+                evaluators=t.get("evaluators", []),
+            )
+        )
 
     graph = TaskGraph(tasks)
 
@@ -200,7 +303,7 @@ def _parse_task_graph(content: str) -> TaskGraph:
     graph.conventions = data.get("conventions", {})
     graph.shared_interfaces = data.get("shared_interfaces", [])
 
-    # Extract protocol-level contracts (new fields — backward compatible)
+    # Extract protocol-level contracts (backward compatible)
     graph.protocol_contracts = data.get("protocol_contracts", [])
     graph.state_machines = data.get("state_machines", [])
     graph.wiring_map = data.get("wiring_map", [])
@@ -209,7 +312,7 @@ def _parse_task_graph(content: str) -> TaskGraph:
 
 
 def _extract_json(content: str) -> dict | None:
-    """Extract the JSON object containing 'tasks' from LLM response content.
+    """Extract the JSON object from LLM response content.
 
     Tries multiple strategies: ```json blocks, generic code blocks,
     brace matching, and finally the raw content.
@@ -217,25 +320,24 @@ def _extract_json(content: str) -> dict | None:
     import re
 
     # Strategy 1: ```json code block
-    match = re.search(r'```json\s*\n(.*?)```', content, re.DOTALL)
+    match = re.search(r"```json\s*\n(.*?)```", content, re.DOTALL)
     if match:
         try:
             return json.loads(match.group(1).strip())
         except json.JSONDecodeError:
             pass
 
-    # Strategy 2: generic code block containing "tasks"
-    match = re.search(r'```\s*\n(.*?)```', content, re.DOTALL)
+    # Strategy 2: generic code block containing "tasks" or expected keys
+    match = re.search(r"```\s*\n(.*?)```", content, re.DOTALL)
     if match:
         candidate = match.group(1).strip()
-        if '"tasks"' in candidate or '"project_structure"' in candidate:
+        if any(key in candidate for key in ('"tasks"', '"objective"', '"valid"', '"phases"')):
             try:
                 return json.loads(candidate)
             except json.JSONDecodeError:
                 pass
 
-    # Strategy 3: brace matching for outermost JSON objects containing "tasks"
-    # Try each top-level '{' in the content until we find one that parses
+    # Strategy 3: brace matching for outermost JSON objects
     search_start = 0
     while True:
         brace_start = content.find("{", search_start)
@@ -250,11 +352,10 @@ def _extract_json(content: str) -> dict | None:
                 depth -= 1
                 if depth == 0:
                     candidate = content[brace_start : i + 1]
-                    if '"tasks"' in candidate:
-                        try:
-                            return json.loads(candidate)
-                        except json.JSONDecodeError:
-                            pass
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        pass
                     found_end = True
                     search_start = i + 1
                     break
@@ -270,13 +371,8 @@ def _extract_json(content: str) -> dict | None:
     return None
 
 
-def _create_folder_structure(project_path: Path, content: str) -> None:
-    """Create the project folder structure from planner output."""
-    data = _extract_json(content)
-    if not data:
-        return
-
-    structure = data.get("project_structure", [])
+def _create_folder_structure(project_path: Path, structure: list[str]) -> None:
+    """Create the project folder structure from a list of paths."""
     for path_str in structure:
         full_path = project_path / path_str
         if path_str.endswith("/"):

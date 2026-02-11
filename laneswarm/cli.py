@@ -16,13 +16,11 @@ from pathlib import Path
 
 import click
 from rich.console import Console
-from rich.live import Live
 from rich.table import Table
 
 from .config import Config, load_config
 from .events import EventBus, EventType, SwarmEvent
-from .flanes_bridge import aggregate_costs, init_project, load_task_graph, store_task_graph
-from .model_selector import select_model
+from .flanes_bridge import aggregate_costs, load_task_graph, store_task_graph
 from .orchestrator import Orchestrator
 from .planner import Planner
 from .providers import ProviderConfig, ProviderRegistry
@@ -112,27 +110,39 @@ def _setup_registry(config: Config) -> ProviderRegistry:
 _FALLBACK_CHAIN: dict[str, list[tuple[str, dict[str, str]]]] = {
     "anthropic": [
         # Prefer Claude SDK (same models, subscription auth)
-        ("claude", {
-            "claude-opus-4-6": "claude-opus-4-6",
-            "claude-sonnet-4-5-20250929": "claude-sonnet-4-5-20250929",
-            "claude-haiku-4-5-20251001": "claude-haiku-4-5-20251001",
-        }),
+        (
+            "claude",
+            {
+                "claude-opus-4-6": "claude-opus-4-6",
+                "claude-sonnet-4-5-20250929": "claude-sonnet-4-5-20250929",
+                "claude-haiku-4-5-20251001": "claude-haiku-4-5-20251001",
+            },
+        ),
         # Fall back to OpenAI
-        ("openai", {
-            "claude-opus-4-6": "gpt-4o",
-            "claude-sonnet-4-5-20250929": "gpt-4o",
-            "claude-haiku-4-5-20251001": "gpt-4o-mini",
-        }),
+        (
+            "openai",
+            {
+                "claude-opus-4-6": "gpt-4o",
+                "claude-sonnet-4-5-20250929": "gpt-4o",
+                "claude-haiku-4-5-20251001": "gpt-4o-mini",
+            },
+        ),
     ],
     "openai": [
-        ("anthropic", {
-            "gpt-4o": "claude-sonnet-4-5-20250929",
-            "gpt-4o-mini": "claude-haiku-4-5-20251001",
-        }),
-        ("claude", {
-            "gpt-4o": "claude-sonnet-4-5-20250929",
-            "gpt-4o-mini": "claude-haiku-4-5-20251001",
-        }),
+        (
+            "anthropic",
+            {
+                "gpt-4o": "claude-sonnet-4-5-20250929",
+                "gpt-4o-mini": "claude-haiku-4-5-20251001",
+            },
+        ),
+        (
+            "claude",
+            {
+                "gpt-4o": "claude-sonnet-4-5-20250929",
+                "gpt-4o-mini": "claude-haiku-4-5-20251001",
+            },
+        ),
     ],
 }
 
@@ -220,8 +230,9 @@ def _create_provider(name: str, config: ProviderConfig):
 
 @click.group()
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
-@click.option("--project", "-p", type=click.Path(exists=True), default=".",
-              help="Project directory")
+@click.option(
+    "--project", "-p", type=click.Path(exists=True), default=".", help="Project directory"
+)
 @click.pass_context
 def main(ctx: click.Context, verbose: bool, project: str) -> None:
     """Laneswarm: Multi-agent autonomous coding system."""
@@ -242,6 +253,20 @@ def plan(ctx: click.Context, spec: str | None, file: str | None, interactive: bo
     config = load_config(project_path)
     registry = _setup_registry(config)
     event_bus = EventBus()
+
+    # Show planning phase progress in real-time
+    def _on_planning_event(event: SwarmEvent) -> None:
+        if event.event_type == EventType.PLANNING_PHASE_STARTED:
+            idx = event.data.get("index", "?")
+            total = event.data.get("total", "?")
+            label = event.data.get("label", event.data.get("phase", ""))
+            console.print(f"  [cyan]Phase {idx}/{total}:[/cyan] {label}...")
+        elif event.event_type == EventType.PLANNING_PHASE_COMPLETED:
+            idx = event.data.get("index", "?")
+            phase = event.data.get("phase", "")
+            console.print(f"  [green]Phase {idx} ({phase}) done[/green]")
+
+    event_bus.subscribe(_on_planning_event)
 
     planner = Planner(project_path, config, registry, event_bus)
 
@@ -313,6 +338,7 @@ def run(ctx: click.Context, workers: int | None, dashboard: bool, port: int) -> 
             console.print(f"[bold blue]Dashboard:[/bold blue] {url}")
 
             import webbrowser
+
             webbrowser.open(url)
         except ImportError:
             console.print(
@@ -321,8 +347,7 @@ def run(ctx: click.Context, workers: int | None, dashboard: bool, port: int) -> 
             )
 
     console.print(
-        f"\n[bold]Running {len(task_graph)} tasks "
-        f"with {config.max_workers} workers...[/bold]\n"
+        f"\n[bold]Running {len(task_graph)} tasks with {config.max_workers} workers...[/bold]\n"
     )
 
     orchestrator = Orchestrator(project_path, config, registry, event_bus)
@@ -332,6 +357,7 @@ def run(ctx: click.Context, workers: int | None, dashboard: bool, port: int) -> 
     # Temporarily ignore SIGINT during the entire orchestration + summary
     # phase so that spurious/delayed signals don't kill the run.
     import signal
+
     prev_handler = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
@@ -365,18 +391,14 @@ def run(ctx: click.Context, workers: int | None, dashboard: bool, port: int) -> 
                 f"{len(smoke.get('checks', []))} checks)"
             )
         else:
-            console.print(
-                f"  Smoke:     [red]failed[/red] "
-                f"({smoke.get('app_type', '?')} app)"
-            )
+            console.print(f"  Smoke:     [red]failed[/red] ({smoke.get('app_type', '?')} app)")
             for check in smoke.get("checks", []):
                 if not check.get("passed"):
                     console.print(
-                        f"             [red]-[/red] {check['name']}: "
-                        f"{check['detail'][:80]}"
+                        f"             [red]-[/red] {check['name']}: {check['detail'][:80]}"
                     )
             if smoke.get("diagnosis"):
-                console.print(f"\n  [bold]Diagnosis:[/bold]")
+                console.print("\n  [bold]Diagnosis:[/bold]")
                 for line in smoke["diagnosis"].split("\n"):
                     console.print(f"    {line}")
 
@@ -410,7 +432,7 @@ def status(ctx: click.Context) -> None:
     # Show cost summary
     costs = aggregate_costs(repo, task_graph=task_graph)
     if costs["total_tokens"] > 0:
-        console.print(f"\n[bold]Costs[/bold]")
+        console.print("\n[bold]Costs[/bold]")
         console.print(f"  Tokens: {costs['total_tokens']:,}")
         console.print(f"  Time:   {costs['wall_time_s']:.1f}s")
 
@@ -473,7 +495,7 @@ def report(ctx: click.Context) -> None:
 
     # Overall costs (aggregate across all task lanes + main)
     costs = aggregate_costs(repo, task_graph=task_graph)
-    console.print(f"\n[bold]Total Costs[/bold]")
+    console.print("\n[bold]Total Costs[/bold]")
     console.print(f"  Input tokens:  {costs['tokens_in']:,}")
     console.print(f"  Output tokens: {costs['tokens_out']:,}")
     console.print(f"  Total tokens:  {costs['total_tokens']:,}")
@@ -517,7 +539,7 @@ def serve(ctx: click.Context, port: int, run_tasks: bool, workers: int | None, h
     event_bus = EventBus()
 
     url = f"http://localhost:{port}"
-    console.print(f"\n[bold blue]Laneswarm Dashboard[/bold blue]")
+    console.print("\n[bold blue]Laneswarm Dashboard[/bold blue]")
     console.print(f"  URL: [link={url}]{url}[/link]")
 
     if run_tasks:
@@ -538,12 +560,14 @@ def serve(ctx: click.Context, port: int, run_tasks: bool, workers: int | None, h
         server.serve_background(host=host, port=port)
 
         import webbrowser
+
         webbrowser.open(url)
 
         # Run the orchestrator (blocking)
         orchestrator = Orchestrator(project_path, config, registry, event_bus)
 
         import signal
+
         prev_handler = signal.getsignal(signal.SIGINT)
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
@@ -573,14 +597,10 @@ def serve(ctx: click.Context, port: int, run_tasks: bool, workers: int | None, h
         if smoke is not None:
             if smoke.get("passed"):
                 console.print(
-                    f"  Smoke:     [green]passed[/green] "
-                    f"({smoke.get('app_type', '?')} app)"
+                    f"  Smoke:     [green]passed[/green] ({smoke.get('app_type', '?')} app)"
                 )
             else:
-                console.print(
-                    f"  Smoke:     [red]failed[/red] "
-                    f"({smoke.get('app_type', '?')} app)"
-                )
+                console.print(f"  Smoke:     [red]failed[/red] ({smoke.get('app_type', '?')} app)")
 
         console.print(f"\n  Dashboard still running at {url}")
         console.print("  Press Ctrl+C to stop.")
@@ -588,9 +608,11 @@ def serve(ctx: click.Context, port: int, run_tasks: bool, workers: int | None, h
         # Keep the dashboard running after execution completes
         try:
             import signal as _sig
+
             _sig.signal(_sig.SIGINT, _sig.default_int_handler)
             while True:
                 import time as _time
+
                 _time.sleep(1)
         except KeyboardInterrupt:
             console.print("\n[dim]Dashboard stopped.[/dim]")
@@ -604,6 +626,7 @@ def serve(ctx: click.Context, port: int, run_tasks: bool, workers: int | None, h
         server = DashboardServer(event_bus, task_graph)
 
         import webbrowser
+
         webbrowser.open(url)
 
         console.print("\n  Press Ctrl+C to stop.\n")
