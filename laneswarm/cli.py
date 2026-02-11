@@ -355,6 +355,31 @@ def run(ctx: click.Context, workers: int | None, dashboard: bool, port: int) -> 
     console.print(f"  Tokens:    {summary['total_tokens']:,}")
     console.print(f"  Time:      {summary['elapsed_seconds']:.1f}s")
 
+    # Smoke test results
+    smoke = summary.get("smoke_test")
+    if smoke is not None:
+        if smoke.get("passed"):
+            console.print(
+                f"  Smoke:     [green]passed[/green] "
+                f"({smoke.get('app_type', '?')} app, "
+                f"{len(smoke.get('checks', []))} checks)"
+            )
+        else:
+            console.print(
+                f"  Smoke:     [red]failed[/red] "
+                f"({smoke.get('app_type', '?')} app)"
+            )
+            for check in smoke.get("checks", []):
+                if not check.get("passed"):
+                    console.print(
+                        f"             [red]-[/red] {check['name']}: "
+                        f"{check['detail'][:80]}"
+                    )
+            if smoke.get("diagnosis"):
+                console.print(f"\n  [bold]Diagnosis:[/bold]")
+                for line in smoke["diagnosis"].split("\n"):
+                    console.print(f"    {line}")
+
     # Restore SIGINT handler only after all output is done
     signal.signal(signal.SIGINT, prev_handler)
 
@@ -542,6 +567,21 @@ def serve(ctx: click.Context, port: int, run_tasks: bool, workers: int | None, h
         console.print(f"  Failed:    [red]{summary['failed']}[/red]")
         console.print(f"  Tokens:    {summary['total_tokens']:,}")
         console.print(f"  Time:      {summary['elapsed_seconds']:.1f}s")
+
+        # Smoke test results
+        smoke = summary.get("smoke_test")
+        if smoke is not None:
+            if smoke.get("passed"):
+                console.print(
+                    f"  Smoke:     [green]passed[/green] "
+                    f"({smoke.get('app_type', '?')} app)"
+                )
+            else:
+                console.print(
+                    f"  Smoke:     [red]failed[/red] "
+                    f"({smoke.get('app_type', '?')} app)"
+                )
+
         console.print(f"\n  Dashboard still running at {url}")
         console.print("  Press Ctrl+C to stop.")
 

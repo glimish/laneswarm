@@ -51,6 +51,16 @@ class EventType(str, Enum):
     VERIFICATION_PASSED = "verification_passed"
     VERIFICATION_FAILED = "verification_failed"
 
+    # Integration validation (post-completion)
+    INTEGRATION_VALIDATION_STARTED = "integration_validation_started"
+    INTEGRATION_VALIDATION_PASSED = "integration_validation_passed"
+    INTEGRATION_VALIDATION_FAILED = "integration_validation_failed"
+
+    # Smoke testing (post-completion runtime validation)
+    SMOKE_TEST_STARTED = "smoke_test_started"
+    SMOKE_TEST_PASSED = "smoke_test_passed"
+    SMOKE_TEST_FAILED = "smoke_test_failed"
+
     # Cost
     COST_UPDATE = "cost_update"
     BUDGET_WARNING = "budget_warning"

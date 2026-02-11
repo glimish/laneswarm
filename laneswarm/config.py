@@ -33,6 +33,7 @@ DEFAULT_MODELS = {
     "coder_low": "anthropic/claude-haiku-4-5-20251001",
     "reviewer": "anthropic/claude-sonnet-4-5-20250929",
     "integrator": "anthropic/claude-sonnet-4-5-20250929",
+    "smoker": "anthropic/claude-haiku-4-5-20251001",
 }
 
 

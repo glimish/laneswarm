@@ -25,7 +25,12 @@ from .agents.reviewer import ReviewerAgent
 from .config import Config
 from .events import EventBus, EventType
 from .flanes_bridge import create_agent_session, create_lane_for_task, record_pipeline_costs
-from .model_selector import select_integrator_model, select_model, select_reviewer_model
+from .model_selector import (
+    select_integrator_model,
+    select_model,
+    select_reviewer_model,
+    select_smoker_model,
+)
 from .providers import ProviderRegistry
 from .task_graph import Task, TaskGraph, TaskStatus
 
@@ -56,10 +61,18 @@ class Orchestrator:
         self.event_bus.emit(EventType.RUN_STARTED, total_tasks=len(task_graph))
         start_time = time.time()
 
-        # Validate the graph
+        # Validate structural integrity (missing deps, cycles)
         errors = task_graph.validate()
         if errors:
             raise ValueError(f"Invalid task graph: {'; '.join(errors)}")
+
+        # Log wiring warnings (advisory — don't block execution)
+        wiring_warnings = task_graph.validate_wiring()
+        if wiring_warnings:
+            logger.warning(
+                "Task graph wiring warnings (non-blocking): %s",
+                "; ".join(wiring_warnings),
+            )
 
         # Main execution loop
         total_tokens_in = 0
@@ -168,6 +181,16 @@ class Orchestrator:
                     **task_graph.progress(),
                 )
 
+        # Post-completion integration validation
+        integration_result = None
+        if completed > 0:
+            integration_result = self._validate_assembled_project(task_graph)
+
+        # Post-completion smoke tests (advisory — results logged but don't block)
+        smoke_result = None
+        if completed > 0:
+            smoke_result = self._run_smoke_tests(task_graph)
+
         elapsed = time.time() - start_time
 
         summary = {
@@ -180,8 +203,86 @@ class Orchestrator:
             "elapsed_seconds": elapsed,
         }
 
+        if integration_result is not None:
+            summary["integration_validation"] = integration_result
+        if smoke_result is not None:
+            summary["smoke_test"] = smoke_result
+
         self.event_bus.emit(EventType.RUN_COMPLETED, **summary)
         return summary
+
+    def _validate_assembled_project(
+        self, task_graph: TaskGraph,
+    ) -> dict | None:
+        """Run integration validation on the assembled project.
+
+        Called after all tasks complete. Checks compile errors, protocol
+        compliance, wiring gaps, and anti-patterns.
+        """
+        from .verification import validate_assembled_project
+
+        self.event_bus.emit(EventType.INTEGRATION_VALIDATION_STARTED)
+
+        try:
+            main_ws = self._repo.workspace_path("main")
+            if main_ws is None:
+                logger.warning("No main workspace found, skipping integration validation")
+                return None
+
+            result = validate_assembled_project(main_ws, task_graph)
+
+            if result.get("passed"):
+                self.event_bus.emit(
+                    EventType.INTEGRATION_VALIDATION_PASSED,
+                    summary=result.get("summary", ""),
+                )
+            else:
+                self.event_bus.emit(
+                    EventType.INTEGRATION_VALIDATION_FAILED,
+                    summary=result.get("summary", ""),
+                    compile_errors=len(result.get("compile_errors", [])),
+                    protocol_violations=len(result.get("protocol_violations", [])),
+                    wiring_gaps=len(result.get("wiring_gaps", [])),
+                    anti_patterns=len(result.get("anti_patterns", [])),
+                )
+
+            return result
+        except Exception as e:
+            logger.warning("Post-completion validation failed: %s", e)
+            return None
+
+    def _run_smoke_tests(
+        self, task_graph: TaskGraph,
+    ) -> dict | None:
+        """Run runtime smoke tests on the assembled project.
+
+        Called after all tasks complete. Starts the server, hits it with
+        HTTP/WS requests, and reports results. Advisory only — failures
+        are logged but don't affect the run summary pass/fail.
+        """
+        from .agents.smoker import SmokerAgent
+
+        try:
+            main_ws = self._repo.workspace_path("main")
+            if main_ws is None:
+                logger.warning("No main workspace found, skipping smoke tests")
+                return None
+
+            smoker_model = select_smoker_model(self.config)
+            smoker = SmokerAgent(
+                repo_path=self.project_path,
+                agent_id="smoker",
+                agent_type="smoker",
+                model_id=smoker_model,
+                registry=self.registry,
+                event_bus=self.event_bus,
+            )
+
+            result = smoker.smoke_test(main_ws, task_graph)
+            return result
+        except Exception as e:
+            logger.warning("Smoke test failed: %s", e)
+            return None
 
     def _execute_task(self, task: Task, task_graph: TaskGraph) -> dict:
         """Execute a single task: code → review → promote.
@@ -341,6 +442,7 @@ class Orchestrator:
         review_result = reviewer.review(
             task, thread_repo, coder_transition_id,
             verification_summary=verification_summary,
+            task_graph=task_graph,
         )
         reviewer_tokens = {
             "tokens_in": review_result.get("tokens_in", 0),

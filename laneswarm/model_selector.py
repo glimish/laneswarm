@@ -104,3 +104,11 @@ def select_integrator_model(config: Config, has_conflicts: bool = False) -> str:
 def select_planner_model(config: Config) -> str:
     """Select model for the planner agent."""
     return config.model_for_role("planner")
+
+
+def select_smoker_model(config: Config) -> str:
+    """Select model for smoke testing.
+
+    Uses a lightweight model since diagnosis is the only LLM call.
+    """
+    return config.model_for_role("smoker")
