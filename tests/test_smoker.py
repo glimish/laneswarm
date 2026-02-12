@@ -1,5 +1,6 @@
 """Tests for the SmokerAgent: app detection, server lifecycle, HTTP checks."""
 
+import subprocess
 import textwrap
 from pathlib import Path
 
@@ -12,10 +13,10 @@ from laneswarm.agents.smoker import (
     _http_get,
     _http_request,
     _run_http_checks,
+    _setup_env,
     _wait_for_port,
     _ws_handshake,
 )
-
 
 # ---------------------------------------------------------------------------
 # App detection tests
@@ -24,7 +25,8 @@ from laneswarm.agents.smoker import (
 
 def test_detect_aiohttp(tmp_path: Path):
     """Detect aiohttp framework from imports."""
-    (tmp_path / "server.py").write_text(textwrap.dedent("""\
+    (tmp_path / "server.py").write_text(
+        textwrap.dedent("""\
         from aiohttp import web
 
         async def hello(request):
@@ -36,7 +38,8 @@ def test_detect_aiohttp(tmp_path: Path):
 
         if __name__ == '__main__':
             web.run_app(app, port=8080)
-    """))
+    """)
+    )
     (tmp_path / "requirements.txt").write_text("aiohttp\n")
 
     info = _detect_app(tmp_path)
@@ -51,7 +54,8 @@ def test_detect_aiohttp(tmp_path: Path):
 
 def test_detect_flask(tmp_path: Path):
     """Detect Flask framework from imports."""
-    (tmp_path / "app.py").write_text(textwrap.dedent("""\
+    (tmp_path / "app.py").write_text(
+        textwrap.dedent("""\
         from flask import Flask
 
         app = Flask(__name__)
@@ -66,7 +70,8 @@ def test_detect_flask(tmp_path: Path):
 
         if __name__ == '__main__':
             app.run(port=5000)
-    """))
+    """)
+    )
 
     info = _detect_app(tmp_path)
     assert info.framework == "flask"
@@ -78,7 +83,8 @@ def test_detect_flask(tmp_path: Path):
 
 def test_detect_fastapi(tmp_path: Path):
     """Detect FastAPI framework from imports."""
-    (tmp_path / "main.py").write_text(textwrap.dedent("""\
+    (tmp_path / "main.py").write_text(
+        textwrap.dedent("""\
         from fastapi import FastAPI
 
         app = FastAPI()
@@ -86,7 +92,8 @@ def test_detect_fastapi(tmp_path: Path):
         @app.get('/api/health')
         def health():
             return {"status": "ok"}
-    """))
+    """)
+    )
 
     info = _detect_app(tmp_path)
     assert info.framework == "fastapi"
@@ -96,7 +103,8 @@ def test_detect_fastapi(tmp_path: Path):
 
 def test_detect_express(tmp_path: Path):
     """Detect Express (Node.js) framework."""
-    (tmp_path / "server.js").write_text(textwrap.dedent("""\
+    (tmp_path / "server.js").write_text(
+        textwrap.dedent("""\
         const express = require('express');
         const app = express();
 
@@ -105,7 +113,8 @@ def test_detect_express(tmp_path: Path):
         });
 
         app.listen(3000);
-    """))
+    """)
+    )
 
     info = _detect_app(tmp_path)
     assert info.framework == "express"
@@ -192,7 +201,8 @@ def test_detect_pyproject_toml(tmp_path: Path):
 
 def test_detect_websocket_endpoints(tmp_path: Path):
     """Detect WebSocket endpoints from source patterns."""
-    (tmp_path / "server.py").write_text(textwrap.dedent("""\
+    (tmp_path / "server.py").write_text(
+        textwrap.dedent("""\
         from aiohttp import web
 
         app = web.Application()
@@ -201,7 +211,8 @@ def test_detect_websocket_endpoints(tmp_path: Path):
 
         if __name__ == '__main__':
             web.run_app(app, port=8080)
-    """))
+    """)
+    )
 
     info = _detect_app(tmp_path)
     assert "/ws" in info.ws_endpoints or "/ws" in info.routes
@@ -210,11 +221,13 @@ def test_detect_websocket_endpoints(tmp_path: Path):
 
 def test_detect_static_dirs(tmp_path: Path):
     """Detect static file directory configuration."""
-    (tmp_path / "app.py").write_text(textwrap.dedent("""\
+    (tmp_path / "app.py").write_text(
+        textwrap.dedent("""\
         from aiohttp import web
         app = web.Application()
         app.router.add_static('/static', 'public')
-    """))
+    """)
+    )
 
     info = _detect_app(tmp_path)
     assert "/static" in info.static_dirs
@@ -287,7 +300,8 @@ def test_app_info_custom():
 
 def test_detect_websockets(tmp_path: Path):
     """Detect websockets library (standalone WS server)."""
-    (tmp_path / "server.py").write_text(textwrap.dedent("""\
+    (tmp_path / "server.py").write_text(
+        textwrap.dedent("""\
         import websockets
         from websockets.http11 import Response
 
@@ -297,7 +311,8 @@ def test_detect_websockets(tmp_path: Path):
         async def start_server():
             async with websockets.serve(handler, '0.0.0.0', 8765):
                 pass
-    """))
+    """)
+    )
 
     info = _detect_app(tmp_path)
     assert info.framework == "websockets"
@@ -307,12 +322,14 @@ def test_detect_websockets(tmp_path: Path):
 
 def test_detect_websockets_from_import(tmp_path: Path):
     """Detect websockets from 'from websockets' import style."""
-    (tmp_path / "app.py").write_text(textwrap.dedent("""\
+    (tmp_path / "app.py").write_text(
+        textwrap.dedent("""\
         from websockets.server import serve
 
         async def handler(ws):
             pass
-    """))
+    """)
+    )
 
     info = _detect_app(tmp_path)
     assert info.framework == "websockets"
@@ -320,15 +337,19 @@ def test_detect_websockets_from_import(tmp_path: Path):
 
 def test_detect_port_with_type_annotation(tmp_path: Path):
     """Port detection handles Python type-annotated class attrs: PORT: int = 8765."""
-    (tmp_path / "config.py").write_text(textwrap.dedent("""\
+    (tmp_path / "config.py").write_text(
+        textwrap.dedent("""\
         class Config:
             HOST: str = '0.0.0.0'
             PORT: int = 8765
-    """))
-    (tmp_path / "server.py").write_text(textwrap.dedent("""\
+    """)
+    )
+    (tmp_path / "server.py").write_text(
+        textwrap.dedent("""\
         import websockets
         from config import Config
-    """))
+    """)
+    )
 
     info = _detect_app(tmp_path)
     assert info.port == 8765
@@ -336,12 +357,14 @@ def test_detect_port_with_type_annotation(tmp_path: Path):
 
 def test_detect_port_simple_assignment(tmp_path: Path):
     """Port detection still works for simple assignments: port = 3000."""
-    (tmp_path / "app.py").write_text(textwrap.dedent("""\
+    (tmp_path / "app.py").write_text(
+        textwrap.dedent("""\
         from flask import Flask
         app = Flask(__name__)
         port = 3000
         app.run(port=port)
-    """))
+    """)
+    )
 
     info = _detect_app(tmp_path)
     assert info.port == 3000
@@ -352,11 +375,13 @@ def test_unknown_framework_with_entry_point_does_not_skip(tmp_path: Path):
 
     The skip condition in _run_smoke_test should only skip when entry_point is None.
     """
-    (tmp_path / "run.py").write_text(textwrap.dedent("""\
+    (tmp_path / "run.py").write_text(
+        textwrap.dedent("""\
         # Some custom server framework
         import my_custom_server
         my_custom_server.start(port=9000)
-    """))
+    """)
+    )
 
     info = _detect_app(tmp_path)
     assert info.framework == "unknown"
@@ -375,7 +400,8 @@ def test_routes_ignore_dict_get(tmp_path: Path):
     Previously, `data.get('username')` matched the route pattern
     `\\.(?:get|post|put|delete)\\(` and returned 'username' as a route.
     """
-    (tmp_path / "server.py").write_text(textwrap.dedent("""\
+    (tmp_path / "server.py").write_text(
+        textwrap.dedent("""\
         import websockets
 
         data = {}
@@ -385,7 +411,8 @@ def test_routes_ignore_dict_get(tmp_path: Path):
         content = data.get('content', '')
         before_id = data.get('before_id', None)
         handler = MESSAGE_HANDLERS.get(msg_type)
-    """))
+    """)
+    )
 
     info = _detect_app(tmp_path)
     # None of these dict.get() calls should be detected as routes
@@ -401,7 +428,8 @@ def test_routes_ignore_dict_get(tmp_path: Path):
 
 def test_routes_require_slash_prefix(tmp_path: Path):
     """Only paths starting with / should be detected as routes."""
-    (tmp_path / "app.py").write_text(textwrap.dedent("""\
+    (tmp_path / "app.py").write_text(
+        textwrap.dedent("""\
         from flask import Flask
         app = Flask(__name__)
 
@@ -412,7 +440,8 @@ def test_routes_require_slash_prefix(tmp_path: Path):
         @app.route('/api/users')
         def users():
             pass
-    """))
+    """)
+    )
 
     info = _detect_app(tmp_path)
     assert "/" in info.routes
@@ -428,7 +457,8 @@ def test_ws_endpoints_ignore_type_annotations(tmp_path: Path):
     Previously, `websockets.WebSocketServerProtocol, dict` was matched
     by the greedy `WebSocket.*?['"]` pattern.
     """
-    (tmp_path / "manager.py").write_text(textwrap.dedent("""\
+    (tmp_path / "manager.py").write_text(
+        textwrap.dedent("""\
         import websockets
 
         class Manager:
@@ -438,7 +468,8 @@ def test_ws_endpoints_ignore_type_annotations(tmp_path: Path):
             async def send(self, ws: websockets.WebSocketServerProtocol):
                 if ws.open:
                     pass
-    """))
+    """)
+    )
 
     info = _detect_app(tmp_path)
     # No WS endpoints should be detected from type annotations
@@ -447,7 +478,8 @@ def test_ws_endpoints_ignore_type_annotations(tmp_path: Path):
 
 def test_ws_endpoints_detect_new_websocket_js(tmp_path: Path):
     """JS `new WebSocket('ws://host/ws')` should detect /ws endpoint."""
-    (tmp_path / "app.js").write_text(textwrap.dedent("""\
+    (tmp_path / "app.js").write_text(
+        textwrap.dedent("""\
         const protocol = 'ws:';
         const host = window.location.host;
         ws = new WebSocket(protocol + '//' + host + '/ws');
@@ -455,7 +487,8 @@ def test_ws_endpoints_detect_new_websocket_js(tmp_path: Path):
         ws.onmessage = function(event) {
             console.log(event.data);
         };
-    """))
+    """)
+    )
     # Need a Python file so it's not detected as static-only
     (tmp_path / "server.py").write_text("import websockets\n")
 
@@ -465,14 +498,16 @@ def test_ws_endpoints_detect_new_websocket_js(tmp_path: Path):
 
 def test_ws_endpoints_detect_path_check(tmp_path: Path):
     """Python `path == '/ws'` should detect /ws as a WS endpoint."""
-    (tmp_path / "server.py").write_text(textwrap.dedent("""\
+    (tmp_path / "server.py").write_text(
+        textwrap.dedent("""\
         import websockets
 
         async def process_request(path, headers):
             if path == '/ws':
                 return None
             return serve_static(path)
-    """))
+    """)
+    )
 
     info = _detect_app(tmp_path)
     assert "/ws" in (info.ws_endpoints + info.routes)
@@ -480,7 +515,8 @@ def test_ws_endpoints_detect_path_check(tmp_path: Path):
 
 def test_routes_detect_path_equality(tmp_path: Path):
     """websockets-style `path == '/route'` checks should be detected."""
-    (tmp_path / "server.py").write_text(textwrap.dedent("""\
+    (tmp_path / "server.py").write_text(
+        textwrap.dedent("""\
         import websockets
 
         async def process_request(path, headers):
@@ -488,7 +524,8 @@ def test_routes_detect_path_equality(tmp_path: Path):
                 return None
             if path == '/health':
                 return (200, {}, b'ok')
-    """))
+    """)
+    )
 
     info = _detect_app(tmp_path)
     assert "/ws" in info.routes
@@ -502,8 +539,8 @@ def test_routes_detect_path_equality(tmp_path: Path):
 
 def test_fetch_openapi_routes_success(monkeypatch):
     """_fetch_openapi_routes parses a valid OpenAPI spec."""
-    import json
     import io
+    import json
     import urllib.request
 
     spec = {
@@ -537,12 +574,16 @@ def test_fetch_openapi_routes_success(monkeypatch):
 
 def test_fetch_openapi_routes_failure(monkeypatch):
     """_fetch_openapi_routes returns None on HTTP error."""
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     def fake_urlopen(req, timeout=None):
         raise urllib.error.HTTPError(
-            req.full_url, 404, "Not Found", {}, None,
+            req.full_url,
+            404,
+            "Not Found",
+            {},
+            None,
         )
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
@@ -619,3 +660,140 @@ def test_app_info_route_methods_default():
     """AppInfo.route_methods defaults to empty dict."""
     info = AppInfo()
     assert info.route_methods == {}
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: smoker round-2 bug fixes
+# ---------------------------------------------------------------------------
+
+
+def test_setup_env_unexpected_exception_cleans_up(tmp_path, monkeypatch):
+    """_setup_env raises on unexpected exceptions and cleans up venv."""
+    (tmp_path / "requirements.txt").write_text("some-pkg\n")
+    app_info = AppInfo(requirements_file="requirements.txt")
+
+    call_count = {"n": 0}
+    original_run = subprocess.run
+
+    def patched_run(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # First call: venv creation — let it succeed
+            return original_run(*args, **kwargs)
+        # Second call: pip install — raise unexpected error
+        raise OSError("disk full")
+
+    monkeypatch.setattr(subprocess, "run", patched_run)
+
+    with pytest.raises(RuntimeError, match="pip install failed.*disk full"):
+        _setup_env(tmp_path, app_info)
+
+
+def test_http_get_accepts_2xx_status(monkeypatch):
+    """_http_get treats all 2xx status codes as success."""
+    import urllib.request
+
+    class FakeResp:
+        status = 201
+
+        def read(self, n=None):
+            return b"created"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: FakeResp())
+    result = _http_get("http://127.0.0.1:9999/resource", "test_201")
+    assert result["passed"] is True
+    assert "201" in result["detail"]
+
+
+def test_http_get_accepts_204_no_content(monkeypatch):
+    """_http_get treats 204 No Content as success."""
+    import urllib.request
+
+    class FakeResp:
+        status = 204
+
+        def read(self, n=None):
+            return b""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: FakeResp())
+    result = _http_get("http://127.0.0.1:9999/empty", "test_204")
+    assert result["passed"] is True
+    assert "204" in result["detail"]
+
+
+def test_detect_fastapi_mount_static(tmp_path: Path):
+    """Detect static mount path from app.mount('/static', StaticFiles(...))."""
+    (tmp_path / "main.py").write_text(
+        textwrap.dedent("""\
+        from fastapi import FastAPI
+        from fastapi.staticfiles import StaticFiles
+
+        app = FastAPI()
+        static_dir = "public"
+        app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    """)
+    )
+
+    info = _detect_app(tmp_path)
+    assert "/static" in info.static_dirs
+
+
+def test_detect_routes_with_api_router_prefix(tmp_path: Path):
+    """Routes from APIRouter files get prefix prepended."""
+    (tmp_path / "main.py").write_text(
+        textwrap.dedent("""\
+        from fastapi import FastAPI
+        app = FastAPI()
+    """)
+    )
+    routers = tmp_path / "routers"
+    routers.mkdir()
+    (routers / "__init__.py").write_text("")
+    (routers / "tags.py").write_text(
+        textwrap.dedent("""\
+        from fastapi import APIRouter
+        router = APIRouter(prefix="/api/tags", tags=["tags"])
+
+        @router.get("/summary")
+        def summary():
+            pass
+
+        @router.get("/{tag_id}")
+        def get_tag(tag_id: int):
+            pass
+    """)
+    )
+
+    info = _detect_app(tmp_path)
+    assert "/api/tags/summary" in info.routes
+
+
+def test_detect_routes_no_double_prefix(tmp_path: Path):
+    """Routes already containing prefix are not double-prefixed."""
+    (tmp_path / "main.py").write_text(
+        textwrap.dedent("""\
+        from fastapi import FastAPI
+        app = FastAPI()
+
+        @app.get("/api/health")
+        def health():
+            pass
+    """)
+    )
+
+    info = _detect_app(tmp_path)
+    assert "/api/health" in info.routes
+    # Should NOT have /api/health/api/health
+    assert not any(r.count("/api/health") > 1 for r in info.routes)

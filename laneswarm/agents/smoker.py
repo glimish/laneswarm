@@ -122,7 +122,12 @@ _STATIC_PATTERNS = [
     re.compile(r"add_static\(\s*['\"]([^'\"]+)['\"]"),
     re.compile(r"static_folder\s*=\s*['\"]([^'\"]+)['\"]"),
     re.compile(r"StaticFiles.*?directory\s*=\s*['\"]([^'\"]+)['\"]"),
+    # FastAPI: app.mount("/static", StaticFiles(...))
+    re.compile(r"\.mount\(\s*['\"]([^'\"]+)['\"].*?StaticFiles"),
 ]
+
+# APIRouter prefix detection (FastAPI)
+_ROUTER_PREFIX_PATTERN = re.compile(r"APIRouter\(\s*prefix\s*=\s*['\"]([^'\"]+)['\"]")
 
 # Directories to skip during scanning
 _SKIP_DIRS = {
@@ -282,20 +287,31 @@ class SmokerAgent(BaseAgent):
             port_ready = _wait_for_port(app_info.port, SERVER_STARTUP_TIMEOUT)
             if not port_ready:
                 # Capture server stderr for diagnosis
-                stderr = ""
+                stderr_text = ""
                 try:
-                    if server_proc.poll() is not None:
-                        _, stderr = server_proc.communicate(timeout=2)
-                        stderr = (stderr or "").strip()
+                    if server_proc.poll() is None:
+                        # Process still running — kill to read stderr
+                        server_proc.terminate()
+                        try:
+                            server_proc.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            server_proc.kill()
+                    _, stderr_bytes = server_proc.communicate(
+                        timeout=2,
+                    )
+                    stderr_text = (stderr_bytes or b"").decode("utf-8", errors="replace").strip()
                 except Exception:
                     pass
                 checks.append(
                     {
                         "name": "server_start",
                         "passed": False,
-                        "detail": f"Server did not bind to port {app_info.port} "
-                        f"within {SERVER_STARTUP_TIMEOUT}s. "
-                        f"stderr: {stderr[:500]}",
+                        "detail": (
+                            f"Server did not bind to port "
+                            f"{app_info.port} within "
+                            f"{SERVER_STARTUP_TIMEOUT}s. "
+                            f"stderr: {stderr_text[:500]}"
+                        ),
                     }
                 )
                 return self._build_result(app_info, checks, project_path)
@@ -530,18 +546,29 @@ def _detect_app(project_path: Path) -> AppInfo:
         info.requirements_file = "pyproject.toml"
 
     # Detect port, routes, WS endpoints, static dirs from all source files
-    for content in file_contents.values():
+    for _rel_path, content in file_contents.items():
         # Port
         for pattern in _PORT_PATTERNS:
             match = pattern.search(content)
             if match:
                 info.port = int(match.group(1))
 
+        # Detect APIRouter prefix for this file (FastAPI)
+        prefix = ""
+        prefix_match = _ROUTER_PREFIX_PATTERN.search(content)
+        if prefix_match:
+            prefix = prefix_match.group(1)
+
         # Routes — only keep values that look like URL paths (start with /)
         for pattern in _ROUTE_PATTERNS:
             for match in pattern.finditer(content):
                 route = match.group(1)
-                if route.startswith("/") and route not in info.routes:
+                if not route.startswith("/"):
+                    continue
+                # Prepend router prefix (avoid double-prefixing)
+                if prefix and not route.startswith(prefix):
+                    route = prefix + route
+                if route not in info.routes:
                     info.routes.append(route)
 
         # WebSocket endpoints — only keep path-like values (start with /)
@@ -671,6 +698,8 @@ def _setup_env(project_path: Path, app_info: AppInfo) -> Path | None:
         raise
     except Exception as e:
         logger.warning("pip install failed: %s", e)
+        shutil.rmtree(venv_dir, ignore_errors=True)
+        raise RuntimeError(f"pip install failed: {e}") from e
 
     return venv_dir
 
@@ -824,7 +853,7 @@ def _http_get(url: str, check_name: str) -> dict:
             status = resp.status
             body = resp.read(4096).decode("utf-8", errors="replace")
 
-            if status == 200:
+            if 200 <= status < 300:
                 detail = f"HTTP {status}, {len(body)} bytes"
                 if not body.strip():
                     detail = f"HTTP {status}, empty body (ok)"
