@@ -62,7 +62,11 @@ def _serve_static(path: str) -> tuple[HTTPStatus, list[tuple[str, str]], bytes] 
 
     # Determine content type
     suffix = file_path.suffix.lower()
-    content_type = CONTENT_TYPES.get(suffix) or mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+    content_type = (
+        CONTENT_TYPES.get(suffix)
+        or mimetypes.guess_type(str(file_path))[0]
+        or "application/octet-stream"
+    )
 
     body = file_path.read_bytes()
     headers = [
@@ -102,8 +106,16 @@ class DashboardServer:
         """Start the server (blocking)."""
         asyncio.run(self._run(host, port))
 
-    def serve_background(self, host: str = "0.0.0.0", port: int = 8420) -> None:
-        """Start the server in a background daemon thread."""
+    def serve_background(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 8420,
+    ) -> None:
+        """Start the server in a background daemon thread.
+
+        Blocks until the server is ready to accept connections (up to 5s).
+        """
+        self._ready = threading.Event()
         self._thread = threading.Thread(
             target=self._run_in_thread,
             args=(host, port),
@@ -111,6 +123,8 @@ class DashboardServer:
             name="laneswarm-dashboard",
         )
         self._thread.start()
+        # Wait for server to bind port before returning
+        self._ready.wait(timeout=5)
 
     def _run_in_thread(self, host: str, port: int) -> None:
         """Entry point for the background thread."""
@@ -130,8 +144,7 @@ class DashboardServer:
             from websockets.asyncio.server import serve
         except ImportError:
             logger.error(
-                "websockets library not installed. "
-                "Install it with: pip install websockets>=12.0"
+                "websockets library not installed. Install it with: pip install websockets>=12.0"
             )
             return
 
@@ -162,7 +175,10 @@ class DashboardServer:
             if result is not None:
                 status, headers, body = result
                 return websockets.http11.Response(
-                    status.value, status.phrase, websockets.datastructures.Headers(headers), body,
+                    status.value,
+                    status.phrase,
+                    websockets.datastructures.Headers(headers),
+                    body,
                 )
             return None
 
@@ -175,6 +191,9 @@ class DashboardServer:
             ) as server:
                 self._server = server
                 logger.info("Dashboard server running at http://%s:%d", host, port)
+                # Signal readiness so serve_background() can return
+                if hasattr(self, "_ready"):
+                    self._ready.set()
                 # Run forever
                 await asyncio.Future()
         except asyncio.CancelledError:

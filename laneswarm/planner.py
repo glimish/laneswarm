@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 from pathlib import Path
 
 from .config import Config
@@ -21,10 +23,8 @@ from .events import EventBus, EventType
 from .flanes_bridge import init_project, store_task_graph
 from .model_selector import select_planner_model
 from .prompts import (
-    PLANNER_ANALYZE_PROMPT,
+    PLANNER_ANALYZE_PLAN_PROMPT,
     PLANNER_DECOMPOSE_PROMPT,
-    PLANNER_RESEARCH_PROMPT,
-    PLANNER_STRUCTURE_PROMPT,
     PLANNER_SYSTEM_PROMPT,
     PLANNER_VALIDATE_PROMPT,
 )
@@ -35,9 +35,7 @@ logger = logging.getLogger(__name__)
 
 # Phase definitions: (name, display label, prompt, max_tokens)
 _PHASES = [
-    ("analyze", "Analyzing project spec", PLANNER_ANALYZE_PROMPT, 2048),
-    ("research", "Researching codebase", PLANNER_RESEARCH_PROMPT, 2048),
-    ("structure", "Structuring plan", PLANNER_STRUCTURE_PROMPT, 2048),
+    ("analyze_plan", "Analyzing and planning", PLANNER_ANALYZE_PLAN_PROMPT, 4096),
     ("decompose", "Decomposing into tasks", PLANNER_DECOMPOSE_PROMPT, 16384),
     ("validate", "Validating task graph", PLANNER_VALIDATE_PROMPT, 4096),
 ]
@@ -74,42 +72,31 @@ class Planner:
         # Scan existing project files for context
         file_listing = _scan_project_files(self.project_path)
 
-        # Phase 1: Analyze
-        analysis = await self._run_phase(
-            0,
-            spec,
-            f"Here is the project specification:\n\n{spec}",
-        )
+        # Phase 1: Analyze + Research + Structure (merged)
+        context = f"## Project Specification\n\n{spec}"
+        if file_listing:
+            context += f"\n\n## Existing Project Files\n{file_listing}"
+        merged = await self._run_phase(0, spec, context)
 
-        # Phase 2: Research
-        research_context = (
-            f"## Analysis Result\n```json\n{json.dumps(analysis, indent=2)}\n```\n\n"
-            f"## Existing Project Files\n{file_listing or '(empty project)'}"
-        )
-        research = await self._run_phase(1, spec, research_context)
+        # Extract sub-results for Phase 2 context
+        analysis = merged.get("analysis", {})
+        research = merged.get("research", {})
+        structure = merged.get("structure", {})
 
-        # Phase 3: Structure
-        structure_context = (
-            f"## Project Spec\n{spec}\n\n"
-            f"## Analysis\n```json\n{json.dumps(analysis, indent=2)}\n```\n\n"
-            f"## Research\n```json\n{json.dumps(research, indent=2)}\n```"
-        )
-        structure = await self._run_phase(2, spec, structure_context)
-
-        # Phase 4: Decompose
+        # Phase 2: Decompose
         decompose_context = (
             f"## Project Spec\n{spec}\n\n"
             f"## Analysis\n```json\n{json.dumps(analysis, indent=2)}\n```\n\n"
             f"## Research\n```json\n{json.dumps(research, indent=2)}\n```\n\n"
             f"## Plan Structure\n```json\n{json.dumps(structure, indent=2)}\n```"
         )
-        task_graph_data = await self._run_phase(3, spec, decompose_context)
+        task_graph_data = await self._run_phase(1, spec, decompose_context)
 
-        # Phase 5: Validate
+        # Phase 3: Validate
         validate_context = (
             f"## Task Graph to Validate\n```json\n{json.dumps(task_graph_data, indent=2)}\n```"
         )
-        validation = await self._run_phase(4, spec, validate_context)
+        validation = await self._run_phase(2, spec, validate_context)
 
         # Use validated graph if available, otherwise use decompose output
         final_data = validation.get("task_graph", task_graph_data)
@@ -164,13 +151,26 @@ class Planner:
 
         messages = [Message(role="user", content=user_content)]
 
-        response = await self.registry.complete(
-            model_id=self.model_id,
-            messages=messages,
-            max_tokens=max_tokens,
-            system=prompt,
-            temperature=0.0,
+        # Emit elapsed-time progress events during the LLM call
+        stop_timer = threading.Event()
+        timer = threading.Thread(
+            target=_elapsed_timer,
+            args=(self.event_bus, name, stop_timer),
+            daemon=True,
         )
+        timer.start()
+
+        try:
+            response = await self.registry.complete(
+                model_id=self.model_id,
+                messages=messages,
+                max_tokens=max_tokens,
+                system=prompt,
+                temperature=0.0,
+            )
+        finally:
+            stop_timer.set()
+            timer.join(timeout=1)
 
         result = _extract_json(response.content)
         if result is None:
@@ -247,6 +247,22 @@ class Planner:
             user_input = answer
 
         return "\n\n".join(spec_parts)
+
+
+def _elapsed_timer(
+    event_bus: EventBus,
+    phase_name: str,
+    stop_event: threading.Event,
+) -> None:
+    """Emit elapsed-time events every 10s until stop_event is set."""
+    start = time.time()
+    while not stop_event.wait(timeout=10):
+        elapsed = int(time.time() - start)
+        event_bus.emit(
+            EventType.PROGRESS_UPDATE,
+            phase=phase_name,
+            elapsed_seconds=elapsed,
+        )
 
 
 def _scan_project_files(project_path: Path) -> str:
