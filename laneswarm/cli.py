@@ -265,6 +265,14 @@ def plan(ctx: click.Context, spec: str | None, file: str | None, interactive: bo
             idx = event.data.get("index", "?")
             phase = event.data.get("phase", "")
             console.print(f"  [green]Phase {idx} ({phase}) done[/green]")
+        elif event.event_type == EventType.PROGRESS_UPDATE:
+            phase = event.data.get("phase", "")
+            elapsed = event.data.get("elapsed_seconds", 0)
+            mins, secs = divmod(elapsed, 60)
+            if mins:
+                console.print(f"    [dim]… {phase} still working ({mins}m {secs}s)[/dim]")
+            else:
+                console.print(f"    [dim]… {phase} still working ({secs}s)[/dim]")
 
     event_bus.subscribe(_on_planning_event)
 

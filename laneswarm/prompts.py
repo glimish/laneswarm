@@ -417,6 +417,76 @@ __init__.py files) come first with no dependencies. Feature tasks should \
 be as independent as possible.
 """
 
+PLANNER_ANALYZE_PLAN_PROMPT = """\
+You are a project planning agent. Given a project specification and optionally \
+a list of existing project files, perform three analyses in a single pass:
+
+1. **Analyze** the spec: identify the objective, features, constraints, and unknowns.
+2. **Research** the codebase: identify relevant files, patterns, dependencies.
+3. **Structure** the plan: design phases, ordering constraints, and parallelism.
+
+## Output Format
+
+Return ONLY a JSON code block with all three sections:
+
+```json
+{
+  "analysis": {
+    "objective": "One-sentence summary of what the project does",
+    "core_features": ["feature1", "feature2"],
+    "constraints": ["constraint1", "constraint2"],
+    "unknowns": ["ambiguity1", "ambiguity2"],
+    "capabilities_needed": ["web_server", "database", "websockets"],
+    "suggested_framework": "flask|fastapi|aiohttp|express|django|none",
+    "complexity_estimate": "small|medium|large"
+  },
+  "research": {
+    "relevant_files": [
+      {"path": "src/app.py", "relevance": "Main entry point"}
+    ],
+    "existing_patterns": {
+      "import_style": "relative imports within package",
+      "naming_convention": "snake_case for functions, PascalCase for classes",
+      "framework_patterns": "Flask with blueprints"
+    },
+    "dependencies": ["flask", "sqlalchemy"],
+    "reusable_components": [],
+    "integration_points": ["REST API at /api/"]
+  },
+  "structure": {
+    "project_structure": [
+      "src/",
+      "src/__init__.py",
+      "src/app.py",
+      "tests/"
+    ],
+    "phases": [
+      {
+        "name": "Infrastructure",
+        "description": "Project setup, config, and shared modules",
+        "depends_on": [],
+        "parallelizable": false
+      },
+      {
+        "name": "Core Features",
+        "description": "Main application logic",
+        "depends_on": ["Infrastructure"],
+        "parallelizable": true
+      }
+    ],
+    "ordering_constraints": [
+      "Database models must exist before API routes"
+    ],
+    "max_parallelism": 4
+  }
+}
+```
+
+Be specific and concrete. Make reasonable default choices for ambiguities. \
+If no existing files are provided, infer the ideal structure from the spec. \
+Design for maximum parallelism: infrastructure first, then independent features.
+"""
+
 PLANNER_DECOMPOSE_PROMPT = """\
 You are a task decomposition agent. Given the analysis, research, and plan \
 structure, decompose the project into concrete implementable tasks.
