@@ -582,6 +582,9 @@ def _detect_app(project_path: Path) -> AppInfo:
         for pattern in _STATIC_PATTERNS:
             for match in pattern.finditer(content):
                 sd = match.group(1)
+                # Normalize to URL-path style (leading slash)
+                if not sd.startswith("/"):
+                    sd = "/" + sd
                 if sd not in info.static_dirs:
                     info.static_dirs.append(sd)
 
@@ -833,8 +836,8 @@ def _run_http_checks(port: int, app_info: AppInfo) -> list[dict]:
 
     # Check 3: Static assets (check if /static/ or similar serves files)
     for static_prefix in app_info.static_dirs:
-        # Just check the prefix returns something
-        url = base_url + static_prefix
+        # Defensive join: ensure exactly one / between base and prefix
+        url = base_url.rstrip("/") + "/" + static_prefix.lstrip("/")
         if not url.endswith("/"):
             url += "/"
         checks.append(_http_get(url, f"http_static:{static_prefix}"))
@@ -869,6 +872,14 @@ def _http_get(url: str, check_name: str) -> dict:
                     "detail": f"HTTP {status}: {body[:200]}",
                 }
     except urllib.error.HTTPError as e:
+        # 422 = FastAPI validation error — route exists but
+        # requires query params we didn't supply
+        if e.code == 422:
+            return {
+                "name": check_name,
+                "passed": True,
+                "detail": ("HTTP 422 (validation error — route exists, missing params)"),
+            }
         return {
             "name": check_name,
             "passed": False,
@@ -945,12 +956,17 @@ def _http_request(url: str, method: str, check_name: str) -> dict:
 
 
 def _run_ws_checks(port: int, app_info: AppInfo) -> list[dict]:
-    """Run WebSocket handshake checks."""
+    """Run WebSocket handshake + functional checks."""
     checks: list[dict] = []
 
     for ws_ep in app_info.ws_endpoints:
         check = _ws_handshake(port, ws_ep)
         checks.append(check)
+
+        # If handshake succeeded, also do a functional check
+        if check["passed"]:
+            func_check = _ws_functional_check(port, ws_ep)
+            checks.append(func_check)
 
     return checks
 
@@ -1009,4 +1025,143 @@ def _ws_handshake(port: int, endpoint: str) -> dict:
             "name": check_name,
             "passed": False,
             "detail": f"WebSocket connection failed: {e}",
+        }
+
+
+def _build_ws_text_frame(payload: bytes) -> bytes:
+    """Build a masked WebSocket text frame (RFC 6455).
+
+    Client-to-server frames MUST be masked per the spec.
+    """
+    import struct
+
+    frame = bytearray()
+    # FIN=1, opcode=0x01 (text)
+    frame.append(0x81)
+    length = len(payload)
+    # Mask bit = 1
+    if length <= 125:
+        frame.append(0x80 | length)
+    elif length <= 65535:
+        frame.append(0x80 | 126)
+        frame.extend(struct.pack("!H", length))
+    else:
+        frame.append(0x80 | 127)
+        frame.extend(struct.pack("!Q", length))
+    # Masking key (4 random bytes)
+    mask = os.urandom(4)
+    frame.extend(mask)
+    # Masked payload
+    for i, b in enumerate(payload):
+        frame.append(b ^ mask[i % 4])
+    return bytes(frame)
+
+
+def _ws_functional_check(port: int, endpoint: str) -> dict:
+    """Attempt a WebSocket handshake, then send a text frame.
+
+    After 101 Switching Protocols, sends a small text frame
+    (``{"type":"ping"}``) and reads the response.  If the server
+    immediately closes the connection or sends a Close frame,
+    that is flagged.  Uses raw socket framing (RFC 6455), no
+    external dependency needed.
+    """
+    import base64
+    import struct
+
+    check_name = f"ws_functional:{endpoint}"
+
+    if not endpoint.startswith("/"):
+        endpoint = "/" + endpoint
+
+    ws_key = base64.b64encode(os.urandom(16)).decode("ascii")
+
+    request_lines = [
+        f"GET {endpoint} HTTP/1.1",
+        f"Host: 127.0.0.1:{port}",
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        f"Sec-WebSocket-Key: {ws_key}",
+        "Sec-WebSocket-Version: 13",
+        "",
+        "",
+    ]
+    request_bytes = "\r\n".join(request_lines).encode("ascii")
+
+    try:
+        sock = socket.create_connection(
+            ("127.0.0.1", port),
+            timeout=HTTP_REQUEST_TIMEOUT,
+        )
+        try:
+            sock.sendall(request_bytes)
+            response = sock.recv(4096).decode(
+                "utf-8",
+                errors="replace",
+            )
+
+            if "101" not in response or "Upgrade" not in response:
+                status_line = response.split("\r\n")[0]
+                return {
+                    "name": check_name,
+                    "passed": False,
+                    "detail": (f"Handshake failed: {status_line[:200]}"),
+                }
+
+            # Handshake succeeded — send a text frame
+            payload = b'{"type":"ping"}'
+            frame = _build_ws_text_frame(payload)
+            sock.sendall(frame)
+
+            # Read response (wait up to 3 seconds)
+            sock.settimeout(3.0)
+            try:
+                resp_data = sock.recv(4096)
+            except socket.timeout:
+                # No response — server didn't crash
+                return {
+                    "name": check_name,
+                    "passed": True,
+                    "detail": ("WS handshake OK, sent ping, no response in 3s (acceptable)"),
+                }
+
+            if not resp_data:
+                return {
+                    "name": check_name,
+                    "passed": False,
+                    "detail": ("WS server closed connection immediately after receiving message"),
+                }
+
+            # Check if it's a Close frame (opcode 0x08)
+            if len(resp_data) >= 2:
+                opcode = resp_data[0] & 0x0F
+                if opcode == 0x08:
+                    close_code = ""
+                    payload_len = resp_data[1] & 0x7F
+                    if payload_len >= 2:
+                        close_code = str(struct.unpack("!H", resp_data[2:4])[0])
+                    return {
+                        "name": check_name,
+                        "passed": False,
+                        "detail": (
+                            "WS server sent Close frame "
+                            "after receiving message"
+                            f" (code: {close_code})"
+                        ),
+                    }
+
+            return {
+                "name": check_name,
+                "passed": True,
+                "detail": (
+                    f"WS handshake OK, message exchange succeeded ({len(resp_data)} bytes back)"
+                ),
+            }
+        finally:
+            sock.close()
+    except Exception as e:
+        return {
+            "name": check_name,
+            "passed": False,
+            "detail": (f"WS functional check failed: {e}"),
         }

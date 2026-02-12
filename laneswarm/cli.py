@@ -3,6 +3,7 @@
 Commands:
 - laneswarm plan <spec>     — Generate a task graph from a project spec
 - laneswarm run             — Execute tasks from the task graph
+- laneswarm fix [desc]      — Generate and run fix tasks for completed project
 - laneswarm status          — Show current task status and progress
 - laneswarm report          — Generate a cost/timeline report
 """
@@ -404,6 +405,186 @@ def run(ctx: click.Context, workers: int | None, dashboard: bool, port: int) -> 
 
     # Restore SIGINT handler only after all output is done
     signal.signal(signal.SIGINT, prev_handler)
+
+
+@main.command()
+@click.argument("description", required=False)
+@click.option(
+    "--file",
+    "-f",
+    type=click.Path(exists=True),
+    help="Read fix description from file",
+)
+@click.option("--dashboard", "-d", is_flag=True, help="Launch live dashboard")
+@click.option("--port", type=int, default=8420, help="Dashboard port (default: 8420)")
+@click.pass_context
+def fix(
+    ctx: click.Context,
+    description: str | None,
+    file: str | None,
+    dashboard: bool,
+    port: int,
+) -> None:
+    """Generate and run fix tasks for a completed project.
+
+    Uses smoke test diagnosis or a user description to plan
+    targeted fixes, then runs only the new fix tasks.
+
+    \b
+    Examples:
+        laneswarm fix "WebSocket handler crashes on message"
+        laneswarm fix --file diagnosis.txt
+        laneswarm fix   # uses last smoke test diagnosis
+    """
+    project_path = ctx.obj["project_path"]
+    config = load_config(project_path)
+    registry = _setup_registry(config)
+
+    from flanes.repo import Repository
+
+    repo = Repository.find(project_path)
+    task_graph = load_task_graph(repo)
+
+    if task_graph is None:
+        console.print(
+            "[red]No task graph found. Run 'laneswarm plan' and 'laneswarm run' first.[/red]"
+        )
+        sys.exit(1)
+
+    # Get fix description
+    if file:
+        fix_text = Path(file).read_text(encoding="utf-8")
+    elif description:
+        fix_text = description
+    else:
+        # Try to use last smoke test diagnosis
+        fix_text = _load_smoke_diagnosis(repo)
+        if not fix_text:
+            console.print(
+                "[red]No fix description provided and no smoke test diagnosis found.[/red]"
+            )
+            console.print("Usage: laneswarm fix 'description' or laneswarm fix -f file.txt")
+            sys.exit(1)
+
+    # Load last smoke result if available
+    smoke_result = _load_smoke_result(repo)
+
+    console.print(f"\n[bold]Planning fixes for {project_path}...[/bold]\n")
+
+    from .fix_planner import FixPlanner
+
+    planner = FixPlanner(project_path, config, registry)
+    try:
+        fix_tasks = planner.plan_fixes(
+            task_graph,
+            fix_text,
+            smoke_result,
+        )
+    except Exception as e:
+        console.print(f"[red]Fix planning failed: {e}[/red]")
+        sys.exit(1)
+
+    if not fix_tasks:
+        console.print("[yellow]Fix planner generated no tasks.[/yellow]")
+        sys.exit(0)
+
+    # Add fix tasks to the graph
+    try:
+        added = task_graph.add_tasks(fix_tasks)
+    except ValueError as e:
+        console.print(f"[red]Cannot add fix tasks: {e}[/red]")
+        sys.exit(1)
+
+    console.print(f"[green]Added {len(added)} fix tasks:[/green]")
+    for task in fix_tasks:
+        deps = ", ".join(task.dependencies) if task.dependencies else "none"
+        console.print(f"  - {task.task_id}: {task.title} [dim](deps: {deps})[/dim]")
+
+    # Persist updated graph
+    try:
+        store_task_graph(repo, task_graph, agent_id="fix-planner")
+    except Exception as e:
+        logger.warning("Failed to persist task graph: %s", e)
+
+    # Run the orchestrator (picks up new PENDING fix tasks)
+    event_bus = EventBus()
+    event_bus.subscribe(lambda ev: None)  # Keep event bus alive
+
+    # Start dashboard if requested
+    dashboard_server = None
+    if dashboard:
+        try:
+            from .dashboard.server import DashboardServer
+
+            dashboard_server = DashboardServer(event_bus, task_graph)
+            dashboard_server.serve_background(host="0.0.0.0", port=port)
+            url = f"http://localhost:{port}"
+            console.print(f"[bold blue]Dashboard:[/bold blue] {url}")
+
+            import webbrowser
+
+            webbrowser.open(url)
+        except ImportError:
+            console.print(
+                "[yellow]Warning: websockets not installed. "
+                "Install with: pip install websockets>=12.0[/yellow]"
+            )
+
+    console.print(f"\n[bold]Running {len(added)} fix tasks...[/bold]\n")
+
+    orchestrator = Orchestrator(project_path, config, registry, event_bus)
+
+    import signal
+
+    prev_handler = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        summary = orchestrator.run(task_graph)
+    except Exception as e:
+        signal.signal(signal.SIGINT, prev_handler)
+        console.print(f"[red]Fix execution failed: {e}[/red]")
+        sys.exit(1)
+
+    # Persist
+    try:
+        store_task_graph(repo, task_graph, agent_id="orchestrator")
+    except Exception as e:
+        logger.warning("Failed to persist task graph: %s", e)
+
+    # Display summary
+    console.print("\n[bold]Fix Execution Complete[/bold]\n")
+    console.print(f"  Completed: [green]{summary['completed']}[/green]")
+    console.print(f"  Failed:    [red]{summary['failed']}[/red]")
+    console.print(f"  Time:      {summary['elapsed_seconds']:.1f}s")
+
+    signal.signal(signal.SIGINT, prev_handler)
+
+
+def _load_smoke_diagnosis(repo) -> str | None:
+    """Load the diagnosis from the last smoke test result."""
+    result = _load_smoke_result(repo)
+    if result and result.get("diagnosis"):
+        return result["diagnosis"]
+    return None
+
+
+def _load_smoke_result(repo) -> dict | None:
+    """Load the last smoke test result from disk."""
+    import json
+
+    try:
+        ws_path = repo.workspace_path("main")
+    except Exception:
+        return None
+    if ws_path is None:
+        return None
+    smoke_file = ws_path / ".laneswarm-smoke.json"
+    if smoke_file.exists():
+        try:
+            return json.loads(smoke_file.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+    return None
 
 
 @main.command()

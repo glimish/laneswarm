@@ -87,9 +87,7 @@ class Orchestrator:
                 # Find ready tasks and submit them
                 ready = task_graph.get_ready_tasks()
                 for task in ready:
-                    if task.task_id not in {
-                        t.task_id for t in active_futures.values()
-                    }:
+                    if task.task_id not in {t.task_id for t in active_futures.values()}:
                         # Create lane lazily — forks from latest main so
                         # promoted dependency files are included.
                         create_lane_for_task(self._repo, task, self.config)
@@ -104,14 +102,10 @@ class Orchestrator:
 
                 if not active_futures:
                     # No tasks ready and no tasks running — check for deadlock
-                    pending = [
-                        t for t in task_graph.tasks
-                        if t.status == TaskStatus.PENDING
-                    ]
+                    pending = [t for t in task_graph.tasks if t.status == TaskStatus.PENDING]
                     if pending:
                         logger.error(
-                            "Deadlock: %d tasks pending but none ready. "
-                            "Check dependency graph.",
+                            "Deadlock: %d tasks pending but none ready. Check dependency graph.",
                             len(pending),
                         )
                         for t in pending:
@@ -147,7 +141,9 @@ class Orchestrator:
                         else:
                             error = result.get("error") or "Unknown error"
                             logger.warning(
-                                "Task '%s' failed: %s", task.task_id, error,
+                                "Task '%s' failed: %s",
+                                task.task_id,
+                                error,
                             )
                             task_graph.mark_failed(task.task_id, error)
                             if task.status == TaskStatus.PENDING:
@@ -191,6 +187,10 @@ class Orchestrator:
         if completed > 0:
             smoke_result = self._run_smoke_tests(task_graph)
 
+        # Persist smoke result so `laneswarm fix` can use it
+        if smoke_result is not None:
+            self._persist_smoke_result(smoke_result)
+
         elapsed = time.time() - start_time
 
         summary = {
@@ -212,7 +212,8 @@ class Orchestrator:
         return summary
 
     def _validate_assembled_project(
-        self, task_graph: TaskGraph,
+        self,
+        task_graph: TaskGraph,
     ) -> dict | None:
         """Run integration validation on the assembled project.
 
@@ -252,7 +253,8 @@ class Orchestrator:
             return None
 
     def _run_smoke_tests(
-        self, task_graph: TaskGraph,
+        self,
+        task_graph: TaskGraph,
     ) -> dict | None:
         """Run runtime smoke tests on the assembled project.
 
@@ -283,6 +285,25 @@ class Orchestrator:
         except Exception as e:
             logger.warning("Smoke test failed: %s", e)
             return None
+
+    def _persist_smoke_result(self, result: dict) -> None:
+        """Save smoke test result to disk for ``laneswarm fix``."""
+        import json
+
+        try:
+            main_ws = self._repo.workspace_path("main")
+            if main_ws is None:
+                return
+            smoke_file = main_ws / ".laneswarm-smoke.json"
+            smoke_file.write_text(
+                json.dumps(result, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.debug(
+                "Failed to persist smoke result: %s",
+                e,
+            )
 
     def _execute_task(self, task: Task, task_graph: TaskGraph) -> dict:
         """Execute a single task: code → review → promote.
@@ -326,15 +347,20 @@ class Orchestrator:
 
         # Step 1: Code
         task.current_phase = "coding"
-        task.agent_steps.append({
-            "phase": "coding",
-            "iteration": task.retries,
-            "timestamp": time.time(),
-            "summary": f"Starting coder with model {model_id}",
-        })
+        task.agent_steps.append(
+            {
+                "phase": "coding",
+                "iteration": task.retries,
+                "timestamp": time.time(),
+                "summary": f"Starting coder with model {model_id}",
+            }
+        )
 
         session = create_agent_session(
-            self.project_path, task, f"coder-{task.task_id}", model_id,
+            self.project_path,
+            task,
+            f"coder-{task.task_id}",
+            model_id,
         )
 
         coder = CoderAgent(
@@ -375,15 +401,17 @@ class Orchestrator:
         # Enrich task with coder results for dashboard
         task.files_written = code_result.get("files_written", [])
         task.verification_result = code_result.get("verification")
-        task.agent_steps.append({
-            "phase": "coding",
-            "iteration": task.retries,
-            "timestamp": time.time(),
-            "summary": (
-                f"Coder finished: {len(task.files_written)} files, "
-                f"{'success' if code_result.get('success') else 'failed'}"
-            ),
-        })
+        task.agent_steps.append(
+            {
+                "phase": "coding",
+                "iteration": task.retries,
+                "timestamp": time.time(),
+                "summary": (
+                    f"Coder finished: {len(task.files_written)} files, "
+                    f"{'success' if code_result.get('success') else 'failed'}"
+                ),
+            }
+        )
 
         # Get the transition ID from the work context
         coder_transition_id = None
@@ -392,7 +420,8 @@ class Orchestrator:
 
         if not code_result.get("success"):
             logger.debug(
-                "Task '%s' coder failed: %s", task.task_id,
+                "Task '%s' coder failed: %s",
+                task.task_id,
                 code_result.get("error") or "Coder produced no files",
             )
             return {
@@ -404,7 +433,8 @@ class Orchestrator:
 
         logger.debug(
             "Task '%s' coder succeeded: %d files",
-            task.task_id, len(code_result.get("files_written", [])),
+            task.task_id,
+            len(code_result.get("files_written", [])),
         )
 
         # Extract verification summary from coder (coder does internal verification)
@@ -417,17 +447,20 @@ class Orchestrator:
             else:
                 logger.debug(
                     "Task '%s' verification issues: %s",
-                    task.task_id, (verification_summary or "")[:200],
+                    task.task_id,
+                    (verification_summary or "")[:200],
                 )
 
         # Step 2: Review
         task.current_phase = "reviewing"
-        task.agent_steps.append({
-            "phase": "reviewing",
-            "iteration": task.retries,
-            "timestamp": time.time(),
-            "summary": "Starting reviewer",
-        })
+        task.agent_steps.append(
+            {
+                "phase": "reviewing",
+                "iteration": task.retries,
+                "timestamp": time.time(),
+                "summary": "Starting reviewer",
+            }
+        )
 
         reviewer_model = select_reviewer_model(self.config)
         reviewer = ReviewerAgent(
@@ -440,7 +473,9 @@ class Orchestrator:
         )
 
         review_result = reviewer.review(
-            task, thread_repo, coder_transition_id,
+            task,
+            thread_repo,
+            coder_transition_id,
             verification_summary=verification_summary,
             task_graph=task_graph,
         )
@@ -454,19 +489,22 @@ class Orchestrator:
         # Enrich task with review results for dashboard
         task.review_summary = review_result.get("summary", "")
         accepted = review_result.get("accepted", False)
-        task.agent_steps.append({
-            "phase": "reviewing",
-            "iteration": task.retries,
-            "timestamp": time.time(),
-            "summary": f"Review {'accepted' if accepted else 'rejected'}: {task.review_summary[:100]}",
-        })
+        task.agent_steps.append(
+            {
+                "phase": "reviewing",
+                "iteration": task.retries,
+                "timestamp": time.time(),
+                "summary": f"Review {'accepted' if accepted else 'rejected'}: {task.review_summary[:100]}",
+            }
+        )
 
         if not accepted:
             # Store reviewer feedback so the coder can use it on retry
             llm_feedback = review_result.get("summary", "")
             task.last_review_feedback = llm_feedback[:500]
             logger.debug(
-                "Task '%s' review rejected: %s", task.task_id,
+                "Task '%s' review rejected: %s",
+                task.task_id,
                 llm_feedback[:300],
             )
             return {
@@ -482,12 +520,14 @@ class Orchestrator:
 
         # Step 3: Promote to main
         task.current_phase = "promoting"
-        task.agent_steps.append({
-            "phase": "promoting",
-            "iteration": task.retries,
-            "timestamp": time.time(),
-            "summary": "Starting promote to main",
-        })
+        task.agent_steps.append(
+            {
+                "phase": "promoting",
+                "iteration": task.retries,
+                "timestamp": time.time(),
+                "summary": "Starting promote to main",
+            }
+        )
 
         integrator_model = select_integrator_model(self.config)
         integrator = IntegratorAgent(
@@ -511,12 +551,14 @@ class Orchestrator:
 
         if promote_result.get("success"):
             task.current_phase = "completed"
-            task.agent_steps.append({
-                "phase": "promoting",
-                "iteration": task.retries,
-                "timestamp": time.time(),
-                "summary": "Promoted to main successfully",
-            })
+            task.agent_steps.append(
+                {
+                    "phase": "promoting",
+                    "iteration": task.retries,
+                    "timestamp": time.time(),
+                    "summary": "Promoted to main successfully",
+                }
+            )
             logger.debug("Task '%s' promoted to main", task.task_id)
             task_graph.mark_completed(task.task_id, coder_transition_id)
             return {
@@ -530,14 +572,17 @@ class Orchestrator:
                 "integrator_tokens": integrator_tokens,
             }
         else:
-            task.agent_steps.append({
-                "phase": "promoting",
-                "iteration": task.retries,
-                "timestamp": time.time(),
-                "summary": f"Promote failed: {promote_result.get('error', 'conflicts')}",
-            })
+            task.agent_steps.append(
+                {
+                    "phase": "promoting",
+                    "iteration": task.retries,
+                    "timestamp": time.time(),
+                    "summary": f"Promote failed: {promote_result.get('error', 'conflicts')}",
+                }
+            )
             logger.debug(
-                "Task '%s' promote failed: %s", task.task_id,
+                "Task '%s' promote failed: %s",
+                task.task_id,
                 promote_result.get("error", "conflicts"),
             )
             return {

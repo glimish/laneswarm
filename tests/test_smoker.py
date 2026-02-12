@@ -8,6 +8,7 @@ import pytest
 
 from laneswarm.agents.smoker import (
     AppInfo,
+    _build_ws_text_frame,
     _detect_app,
     _fetch_openapi_routes,
     _http_get,
@@ -15,6 +16,7 @@ from laneswarm.agents.smoker import (
     _run_http_checks,
     _setup_env,
     _wait_for_port,
+    _ws_functional_check,
     _ws_handshake,
 )
 
@@ -797,3 +799,129 @@ def test_detect_routes_no_double_prefix(tmp_path: Path):
     assert "/api/health" in info.routes
     # Should NOT have /api/health/api/health
     assert not any(r.count("/api/health") > 1 for r in info.routes)
+
+
+# ---------------------------------------------------------------------------
+# Static dir normalization tests
+# ---------------------------------------------------------------------------
+
+
+def test_static_dir_normalization_leading_slash(tmp_path: Path):
+    """Static dirs detected without leading / get normalized."""
+    (tmp_path / "app.py").write_text(
+        textwrap.dedent("""\
+        from flask import Flask
+        app = Flask(__name__, static_folder='public')
+    """)
+    )
+
+    info = _detect_app(tmp_path)
+    # Should be normalized to /public, not bare "public"
+    assert "/public" in info.static_dirs
+    assert "public" not in info.static_dirs
+
+
+def test_static_url_construction_with_slash(tmp_path: Path):
+    """Static URL is well-formed when prefix has leading /."""
+    info = AppInfo(
+        framework="fastapi",
+        static_dirs=["/static"],
+        routes=["/"],
+        port=9999,
+    )
+    # _run_http_checks will try to connect — just verify
+    # it doesn't produce a malformed URL
+    checks = _run_http_checks(9999, info)
+    # The check will fail (no server) but the URL should be correct
+    static_checks = [c for c in checks if "http_static" in c["name"]]
+    assert len(static_checks) == 1
+    # Should NOT contain "9999static" (the old bug)
+    assert "9999static" not in static_checks[0]["detail"]
+
+
+# ---------------------------------------------------------------------------
+# HTTP 422 handling tests
+# ---------------------------------------------------------------------------
+
+
+def test_http_get_422_passes(monkeypatch):
+    """_http_get treats 422 as pass (route exists, missing params)."""
+    import urllib.error
+    import urllib.request
+
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            422,
+            "Unprocessable Entity",
+            {},
+            None,
+        )
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        fake_urlopen,
+    )
+    result = _http_get("http://127.0.0.1:9999/api/stats", "test_422")
+    assert result["passed"] is True
+    assert "422" in result["detail"]
+    assert "validation" in result["detail"].lower()
+
+
+def test_http_get_403_still_fails(monkeypatch):
+    """_http_get still treats 403 as failure."""
+    import urllib.error
+    import urllib.request
+
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            403,
+            "Forbidden",
+            {},
+            None,
+        )
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        fake_urlopen,
+    )
+    result = _http_get("http://127.0.0.1:9999/secret", "test_403")
+    assert result["passed"] is False
+    assert "403" in result["detail"]
+
+
+# ---------------------------------------------------------------------------
+# WebSocket functional testing
+# ---------------------------------------------------------------------------
+
+
+def test_build_ws_text_frame_structure():
+    """_build_ws_text_frame produces valid masked RFC 6455 frame."""
+    payload = b'{"type":"ping"}'
+    frame = _build_ws_text_frame(payload)
+
+    # First byte: FIN=1, opcode=0x01 (text) → 0x81
+    assert frame[0] == 0x81
+    # Second byte: mask=1, length for payload <= 125
+    assert frame[1] & 0x80 == 0x80  # mask bit set
+    length = frame[1] & 0x7F
+    assert length == len(payload)
+    # Bytes 2-5: masking key
+    mask = frame[2:6]
+    assert len(mask) == 4
+    # Remaining: masked payload — unmask and verify
+    masked_payload = frame[6:]
+    assert len(masked_payload) == len(payload)
+    unmasked = bytes(b ^ mask[i % 4] for i, b in enumerate(masked_payload))
+    assert unmasked == payload
+
+
+def test_ws_functional_check_connection_refused():
+    """_ws_functional_check fails gracefully on unreachable port."""
+    # Port 1 should never be listening
+    result = _ws_functional_check(1, "/ws")
+    assert result["passed"] is False
+    assert result["name"] == "ws_functional:/ws"
