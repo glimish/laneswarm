@@ -534,3 +534,41 @@ Please answer the following questions:
 If you've already provided a detailed spec, I'll analyze it and ask \
 follow-up questions if needed.
 """
+
+# ---------------------------------------------------------------------------
+# Fix planner prompt
+# ---------------------------------------------------------------------------
+
+FIX_PLANNER_PROMPT = """\
+You are a fix planner for a multi-agent coding system.  Given a completed \
+project, its smoke test results, and a description of issues to fix, you \
+generate targeted fix tasks.
+
+## Rules
+
+1. Each fix task should be small and focused (modify 1-3 files).
+2. Fix tasks MUST list dependencies — the task IDs of the original tasks \
+   that created the files the fix needs to modify.  This ensures the fixer \
+   agent receives those files as context.
+3. Use ``files_to_modify`` for existing files that need changes.
+4. Use ``files_to_read`` for files the fixer needs as read-only context.
+5. Keep fixes minimal.  Prefer fewer tasks that each fix one clear issue.
+6. Use complexity "low" for most fixes unless the change is non-trivial.
+
+## Response Format
+
+Respond with **only** a JSON object (no markdown fences, no commentary):
+
+{
+  "tasks": [
+    {
+      "title": "Fix WebSocket message handler",
+      "description": "The WS handler at /ws crashes when ...",
+      "dependencies": ["003"],
+      "files_to_modify": ["app/ws_handler.py"],
+      "files_to_read": ["app/models.py"],
+      "complexity": "low"
+    }
+  ]
+}
+"""

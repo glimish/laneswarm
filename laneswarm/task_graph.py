@@ -50,7 +50,9 @@ class Task:
     wall_time_ms: float = 0.0
     # Dashboard-enriched fields (populated during execution)
     current_phase: str = ""  # "coding", "reviewing", "promoting", "completed"
-    agent_steps: list[dict] = field(default_factory=list)  # [{phase, iteration, timestamp, summary}]
+    agent_steps: list[dict] = field(
+        default_factory=list
+    )  # [{phase, iteration, timestamp, summary}]
     files_written: list[str] = field(default_factory=list)  # Actual files produced by coder
     verification_result: dict | None = None  # Last verification output
     review_summary: str = ""  # Reviewer's LLM feedback (accepted/rejected + reason)
@@ -164,6 +166,45 @@ class TaskGraph:
         """All task IDs."""
         return list(self._tasks.keys())
 
+    def add_tasks(self, tasks: list[Task]) -> list[str]:
+        """Add fix/additional tasks to an existing graph.
+
+        All dependency IDs must reference existing tasks in the
+        graph or other tasks in the batch.  Returns the list of
+        newly added task IDs.
+
+        Raises ValueError if any dependency references a
+        non-existent task, any task ID already exists, or
+        adding the tasks would create a cycle.
+        """
+        new_ids = {t.task_id for t in tasks}
+
+        # Validate first — no partial adds
+        for task in tasks:
+            if task.task_id in self._tasks:
+                raise ValueError(f"Task '{task.task_id}' already exists")
+            for dep_id in task.dependencies:
+                if dep_id not in self._tasks and dep_id not in new_ids:
+                    raise ValueError(
+                        f"Fix task '{task.task_id}' depends on '{dep_id}' which doesn't exist"
+                    )
+
+        # Add all tasks
+        added: list[str] = []
+        for task in tasks:
+            self._tasks[task.task_id] = task
+            added.append(task.task_id)
+
+        # Validate no cycles were introduced
+        cycle = self._detect_cycle()
+        if cycle:
+            # Rollback
+            for tid in added:
+                del self._tasks[tid]
+            raise ValueError(f"Adding fix tasks would create a cycle: {' -> '.join(cycle)}")
+
+        return added
+
     def validate(self) -> list[str]:
         """Validate structural integrity of the graph.
 
@@ -204,8 +245,7 @@ class TaskGraph:
             producer = pc.get("producer_task", "")
             if producer and producer not in self._tasks:
                 errors.append(
-                    f"Protocol contract '{name}' references non-existent "
-                    f"producer task '{producer}'"
+                    f"Protocol contract '{name}' references non-existent producer task '{producer}'"
                 )
             for consumer in pc.get("consumer_tasks", []):
                 if consumer not in self._tasks:
@@ -219,8 +259,7 @@ class TaskGraph:
             for task_id in sm.get("relevant_tasks", []):
                 if task_id not in self._tasks:
                     errors.append(
-                        f"State machine '{name}' references non-existent "
-                        f"task '{task_id}'"
+                        f"State machine '{name}' references non-existent task '{task_id}'"
                     )
 
         for wm in self.wiring_map:

@@ -52,19 +52,23 @@ def test_task_graph_duplicate_id():
 
 
 def test_task_graph_validation_missing_dep():
-    graph = TaskGraph([
-        Task(task_id="001", title="A", description="...", dependencies=["999"]),
-    ])
+    graph = TaskGraph(
+        [
+            Task(task_id="001", title="A", description="...", dependencies=["999"]),
+        ]
+    )
     errors = graph.validate()
     assert len(errors) == 1
     assert "999" in errors[0]
 
 
 def test_task_graph_validation_cycle():
-    graph = TaskGraph([
-        Task(task_id="001", title="A", description="...", dependencies=["002"]),
-        Task(task_id="002", title="B", description="...", dependencies=["001"]),
-    ])
+    graph = TaskGraph(
+        [
+            Task(task_id="001", title="A", description="...", dependencies=["002"]),
+            Task(task_id="002", title="B", description="...", dependencies=["001"]),
+        ]
+    )
     errors = graph.validate()
     assert len(errors) == 1
     assert "cycle" in errors[0].lower()
@@ -114,9 +118,11 @@ def test_mark_failed_max_retries(sample_task_graph):
 
 
 def test_all_complete():
-    graph = TaskGraph([
-        Task(task_id="001", title="A", description="..."),
-    ])
+    graph = TaskGraph(
+        [
+            Task(task_id="001", title="A", description="..."),
+        ]
+    )
     assert not graph.all_complete()
     graph.mark_completed("001")
     assert graph.all_complete()
@@ -149,3 +155,93 @@ def test_json_roundtrip(sample_task_graph):
     assert len(restored) == len(sample_task_graph)
     assert restored.get_task("001").title == "Project setup"
     assert restored.get_task("004").dependencies == ["002", "003"]
+
+
+# ---------------------------------------------------------------------------
+# add_tasks() tests
+# ---------------------------------------------------------------------------
+
+
+def test_add_tasks_basic(sample_task_graph):
+    """Adding fix tasks with valid deps succeeds."""
+    # Mark deps as completed so we can verify ready status
+    sample_task_graph.mark_completed("001")
+
+    fix_tasks = [
+        Task(
+            task_id="fix-001",
+            title="Fix auth",
+            description="Fix auth bug",
+            dependencies=["001"],
+        ),
+    ]
+    added = sample_task_graph.add_tasks(fix_tasks)
+    assert added == ["fix-001"]
+    assert "fix-001" in sample_task_graph.task_ids
+
+    # Fix task should be ready (dep 001 is completed)
+    ready = sample_task_graph.get_ready_tasks()
+    ready_ids = [t.task_id for t in ready]
+    assert "fix-001" in ready_ids
+
+
+def test_add_tasks_duplicate_rejected(sample_task_graph):
+    """Adding a task with an existing ID raises ValueError."""
+    fix_tasks = [
+        Task(
+            task_id="001",  # Already exists
+            title="Dup",
+            description="...",
+        ),
+    ]
+    with pytest.raises(ValueError, match="already exists"):
+        sample_task_graph.add_tasks(fix_tasks)
+
+
+def test_add_tasks_missing_dep_rejected(sample_task_graph):
+    """Adding a task with a non-existent dep raises ValueError."""
+    fix_tasks = [
+        Task(
+            task_id="fix-001",
+            title="Fix",
+            description="...",
+            dependencies=["nonexistent"],
+        ),
+    ]
+    with pytest.raises(ValueError, match="doesn't exist"):
+        sample_task_graph.add_tasks(fix_tasks)
+    # Graph should be unchanged
+    assert "fix-001" not in sample_task_graph.task_ids
+
+
+def test_add_tasks_inter_dependency():
+    """Fix tasks can depend on each other within the batch."""
+    graph = TaskGraph(
+        [
+            Task(task_id="001", title="A", description="..."),
+        ]
+    )
+    graph.mark_completed("001")
+
+    fix_tasks = [
+        Task(
+            task_id="fix-001",
+            title="Fix A",
+            description="...",
+            dependencies=["001"],
+        ),
+        Task(
+            task_id="fix-002",
+            title="Fix B",
+            description="...",
+            dependencies=["fix-001"],
+        ),
+    ]
+    added = graph.add_tasks(fix_tasks)
+    assert added == ["fix-001", "fix-002"]
+
+    # Only fix-001 should be ready (fix-002 depends on it)
+    ready = graph.get_ready_tasks()
+    ready_ids = [t.task_id for t in ready]
+    assert "fix-001" in ready_ids
+    assert "fix-002" not in ready_ids

@@ -17,6 +17,8 @@ let state = {
 };
 let feedPaused = false;
 let currentFilter = 'all';
+let runStartedAt = null;
+let wallTimeInterval = null;
 const MAX_FEED_ITEMS = 200;
 
 // ── WebSocket ──────────────────────────────────────────────
@@ -77,7 +79,35 @@ function handleMessage(msg) {
 }
 
 function updateFromEvent(event) {
-    // Update task state from events
+    // Handle orchestrator-level events (no task_id required)
+    switch (event.event_type) {
+        case 'run_started':
+            runStartedAt = Date.now();
+            if (wallTimeInterval) clearInterval(wallTimeInterval);
+            wallTimeInterval = setInterval(() => {
+                if (runStartedAt) {
+                    state.costs.total_wall_ms = Date.now() - runStartedAt;
+                    renderProgress();
+                }
+            }, 1000);
+            return;
+        case 'run_completed':
+            if (wallTimeInterval) {
+                clearInterval(wallTimeInterval);
+                wallTimeInterval = null;
+            }
+            runStartedAt = null;
+            if (event.data.elapsed_seconds !== undefined) {
+                state.costs.total_wall_ms = event.data.elapsed_seconds * 1000;
+            }
+            if (event.data.total_tokens !== undefined) {
+                state.costs.total_tokens = event.data.total_tokens;
+            }
+            renderProgress();
+            return;
+    }
+
+    // Task-specific events
     const taskId = event.task_id;
     if (!taskId) return;
 
@@ -141,14 +171,6 @@ function updateFromEvent(event) {
                 state.costs.total_tokens = event.data.total_tokens;
             }
             break;
-        case 'run_completed':
-            if (event.data.total_tokens !== undefined) {
-                state.costs.total_tokens = event.data.total_tokens;
-            }
-            if (event.data.elapsed_seconds !== undefined) {
-                state.costs.total_wall_ms = event.data.elapsed_seconds * 1000;
-            }
-            break;
     }
 }
 
@@ -170,13 +192,19 @@ function recalcProgress() {
 function recalcCosts() {
     // Recount from actual task data — authoritative source of truth
     let totalTokens = 0;
-    let totalWallMs = 0;
     for (const t of state.tasks) {
         totalTokens += (t.tokens_used || 0);
-        totalWallMs += (t.wall_time_ms || 0);
     }
     state.costs.total_tokens = totalTokens;
-    state.costs.total_wall_ms = totalWallMs;
+    // Only sum task times when no run is active; during an active
+    // run the wall time is driven by the real-time clock interval.
+    if (!runStartedAt) {
+        let totalWallMs = 0;
+        for (const t of state.tasks) {
+            totalWallMs += (t.wall_time_ms || 0);
+        }
+        state.costs.total_wall_ms = totalWallMs;
+    }
 }
 
 function renderAll() {
